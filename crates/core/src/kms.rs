@@ -77,29 +77,58 @@ impl KmsRef {
 
     /// Resolve a page name to a file path inside `pages/`. `.md` is added
     /// if missing. Returns an error if the resolved path escapes the KMS
-    /// root (defense against `..` in user-supplied page names).
+    /// directory via `..`, an absolute path, path separators, null bytes,
+    /// or symlink trickery (e.g. `pages/` itself symlinked outside, or a
+    /// page file symlinked to `/etc/passwd`).
     pub fn page_path(&self, page: &str) -> Result<PathBuf> {
+        // Reject obviously-bad names before touching the filesystem.
+        if page.is_empty()
+            || page.contains("..")
+            || page.contains('/')
+            || page.contains('\\')
+            || page.contains('\0')
+            || page.chars().any(|c| c.is_control())
+            || Path::new(page).is_absolute()
+        {
+            return Err(Error::Tool(format!(
+                "invalid page name '{page}' — no '..', path separators, or control chars"
+            )));
+        }
         let name = if page.ends_with(".md") {
             page.to_string()
         } else {
             format!("{page}.md")
         };
         let candidate = self.pages_dir().join(&name);
-        // Reject anything that escapes pages_dir via `..` or absolute path.
-        let pages_dir = self.pages_dir();
-        let canon_parent = std::fs::canonicalize(&pages_dir).unwrap_or_else(|_| pages_dir.clone());
-        // canonicalize fails on non-existent files, so compare logically too.
-        if name.contains("..") || Path::new(&name).is_absolute() {
+
+        // Canonicalize the scope root and require the candidate to resolve
+        // *within* this specific KMS directory under it. This defeats
+        // symlink bypasses: if `pages/` or the page file itself is a
+        // symlink pointing outside, the canonical candidate escapes the
+        // KMS root and we reject.
+        let canon_candidate = std::fs::canonicalize(&candidate).map_err(|e| {
+            Error::Tool(format!(
+                "cannot resolve page path '{}': {e}",
+                candidate.display()
+            ))
+        })?;
+        let canon_scope = scope_root(self.scope)
+            .and_then(|p| std::fs::canonicalize(&p).ok())
+            .ok_or_else(|| Error::Tool("kms scope root not resolvable".into()))?;
+        let canon_kms_root = canon_scope.join(&self.name);
+        if !canon_candidate.starts_with(&canon_kms_root) {
             return Err(Error::Tool(format!(
-                "invalid page name '{page}' — must not contain '..' or be absolute"
+                "page '{page}' resolves outside the KMS directory — symlink escape rejected"
             )));
         }
-        if let Ok(c) = std::fs::canonicalize(&candidate) {
-            if !c.starts_with(&canon_parent) {
-                return Err(Error::Tool(format!(
-                    "page '{page}' resolves outside the KMS pages directory"
-                )));
-            }
+        // Also require it's a regular file, not a directory.
+        let meta = std::fs::metadata(&canon_candidate).map_err(|e| {
+            Error::Tool(format!("cannot stat page '{page}': {e}"))
+        })?;
+        if !meta.is_file() {
+            return Err(Error::Tool(format!(
+                "page '{page}' is not a regular file"
+            )));
         }
         Ok(candidate)
     }
@@ -125,7 +154,9 @@ fn scope_root(scope: KmsScope) -> Option<PathBuf> {
 }
 
 /// Enumerate KMS directories under one scope. Silently ignores missing
-/// roots — fresh installs have neither.
+/// roots — fresh installs have neither. Symlinks are intentionally
+/// skipped: a user can't turn a KMS directory into a symlink to `/etc`
+/// and have thClaws enumerate it.
 fn list_in(scope: KmsScope) -> Vec<KmsRef> {
     let Some(root) = scope_root(scope) else {
         return Vec::new();
@@ -135,7 +166,13 @@ fn list_in(scope: KmsScope) -> Vec<KmsRef> {
     };
     let mut out = Vec::new();
     for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        // symlink_metadata → file_type doesn't follow the symlink, so
+        // a `ln -s /etc foo` sitting in the kms dir returns is_symlink.
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() || !ft.is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -163,18 +200,25 @@ pub fn list_all() -> Vec<KmsRef> {
 
 /// Find a KMS by name. Project scope wins over user on collision — this
 /// matches how project instructions override user instructions elsewhere
-/// in thClaws. Returns `None` when no KMS by that name exists.
+/// in thClaws. Returns `None` when no KMS by that name exists, or when
+/// the matching directory is a symlink (symlinks are rejected to prevent
+/// `ln -s /etc <kms-name>` style exfiltration).
 pub fn resolve(name: &str) -> Option<KmsRef> {
     for scope in [KmsScope::Project, KmsScope::User] {
         if let Some(root) = scope_root(scope) {
             let candidate = root.join(name);
-            if candidate.is_dir() {
-                return Some(KmsRef {
-                    name: name.to_string(),
-                    scope,
-                    root: candidate,
-                });
+            // symlink_metadata doesn't follow the symlink.
+            let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+                continue;
+            };
+            if meta.is_symlink() || !meta.is_dir() {
+                continue;
             }
+            return Some(KmsRef {
+                name: name.to_string(),
+                scope,
+                root: candidate,
+            });
         }
     }
     None
@@ -188,9 +232,16 @@ pub fn create(name: &str, scope: KmsScope) -> Result<KmsRef> {
     if name.is_empty() {
         return Err(Error::Config("kms name must not be empty".into()));
     }
-    if name.contains('/') || name.contains("..") || Path::new(name).is_absolute() {
+    if name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+        || name.chars().any(|c| c.is_control())
+        || name.starts_with('.')
+        || Path::new(name).is_absolute()
+    {
         return Err(Error::Config(format!(
-            "invalid kms name '{name}' — no path separators or '..'"
+            "invalid kms name '{name}' — no path separators, '..', control chars, or leading '.'"
         )));
     }
     let root = scope_root(scope)
@@ -389,6 +440,52 @@ mod tests {
         let k = create("nb", KmsScope::User).unwrap();
         assert!(k.page_path("../../etc/passwd").is_err());
         assert!(k.page_path("/etc/passwd").is_err());
+        assert!(k.page_path("foo/bar").is_err()); // path separator
+        assert!(k.page_path("").is_err()); // empty name
+        assert!(k.page_path("foo\0bar").is_err()); // null byte
+
+        // The happy path: create the file first (page_path now requires
+        // the file to exist so it can canonicalize + symlink-check).
+        std::fs::write(k.pages_dir().join("ok-page.md"), "body").unwrap();
         assert!(k.page_path("ok-page").is_ok());
+    }
+
+    #[test]
+    fn page_path_rejects_symlink_to_outside() {
+        use std::os::unix::fs::symlink;
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+
+        // Attacker plants a symlink in pages/ to an outside target.
+        let target_dir = tempfile::tempdir().unwrap();
+        let outside_file = target_dir.path().join("secret.md");
+        std::fs::write(&outside_file, "top secret").unwrap();
+        let symlink_path = k.pages_dir().join("leaked.md");
+        symlink(&outside_file, &symlink_path).unwrap();
+
+        // Despite the file existing (via symlink), page_path rejects
+        // because canonical candidate escapes the KMS root.
+        let result = k.page_path("leaked");
+        assert!(result.is_err(), "expected symlink to be rejected");
+        let err_str = format!("{}", result.unwrap_err());
+        assert!(
+            err_str.contains("symlink escape") || err_str.contains("outside the KMS"),
+            "unexpected error: {err_str}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_symlink_kms_dir() {
+        use std::os::unix::fs::symlink;
+        let _home = scoped_home();
+
+        // Attacker plants a symlink where a KMS dir should be.
+        let target = tempfile::tempdir().unwrap();
+        let kms_root = scope_root(KmsScope::User).unwrap();
+        std::fs::create_dir_all(&kms_root).unwrap();
+        symlink(target.path(), kms_root.join("evil")).unwrap();
+
+        // resolve() should not return a KmsRef for a symlinked dir.
+        assert!(resolve("evil").is_none(), "symlinked KMS dir should be rejected");
     }
 }

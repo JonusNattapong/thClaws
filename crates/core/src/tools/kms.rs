@@ -91,6 +91,12 @@ impl Tool for KmsSearchTool {
 
         let mut results: Vec<String> = Vec::new();
         for entry in entries.flatten() {
+            // Skip symlinks to prevent `ln -s ~/.ssh/id_rsa pages/leak.md`
+            // style exfiltration via grep.
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             if !path.extension().map(|e| e == "md").unwrap_or(false) {
                 continue;

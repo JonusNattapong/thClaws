@@ -197,6 +197,23 @@ impl ProviderKind {
 
 pub use assemble::{assemble, collect_turn, AssembledEvent, TurnResult};
 
+/// Scrub an API key from an error response body before surfacing it.
+///
+/// Some LLM providers echo the offending `Authorization` header (or the
+/// `?key=...` query param, in Gemini's case) into 4xx/5xx response
+/// bodies. Those bodies end up in user-visible error messages via
+/// `Error::Provider(format!("http {status}: {text}"))`. Passing the
+/// body through this helper first ensures the key never appears in
+/// logs, session JSONL, or the REPL output.
+pub(crate) fn redact_key(text: &str, key: &str) -> String {
+    if key.len() < 8 {
+        // Don't redact values shorter than 8 chars — they're more likely
+        // false positives than real secrets.
+        return text.to_string();
+    }
+    text.replace(key, "<redacted-api-key>")
+}
+
 /// Optional debug helper: when `THCLAWS_SHOW_RAW=1` (env) or
 /// `showRawResponse: true` (settings.json) is set, providers accumulate the
 /// assistant's text as it streams and dump a fenced dim block to stderr at

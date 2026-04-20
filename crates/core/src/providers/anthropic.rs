@@ -123,7 +123,7 @@ impl Provider for AnthropicProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!("http {status}: {text}")));
+            return Err(Error::Provider(format!("http {status}: {}", super::redact_key(&text, &self.api_key))));
         }
         let v: Value = resp
             .json()
@@ -151,21 +151,6 @@ impl Provider for AnthropicProvider {
 
     async fn stream(&self, req: StreamRequest) -> Result<EventStream> {
         let body = Self::build_body(&req);
-        if let Ok(path) = std::env::var("CHEETAHCLAWS_WIRE_LOG") {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-            {
-                let _ = writeln!(
-                    f,
-                    "=== POST {} ===\n{}\n",
-                    self.base_url,
-                    serde_json::to_string_pretty(&body).unwrap_or_default()
-                );
-            }
-        }
         let resp = self
             .client
             .post(&self.base_url)
@@ -180,7 +165,7 @@ impl Provider for AnthropicProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!("http {status}: {text}")));
+            return Err(Error::Provider(format!("http {status}: {}", super::redact_key(&text, &self.api_key))));
         }
 
         let byte_stream = resp.bytes_stream();
