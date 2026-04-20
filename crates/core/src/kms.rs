@@ -122,13 +122,10 @@ impl KmsRef {
             )));
         }
         // Also require it's a regular file, not a directory.
-        let meta = std::fs::metadata(&canon_candidate).map_err(|e| {
-            Error::Tool(format!("cannot stat page '{page}': {e}"))
-        })?;
+        let meta = std::fs::metadata(&canon_candidate)
+            .map_err(|e| Error::Tool(format!("cannot stat page '{page}': {e}")))?;
         if !meta.is_file() {
-            return Err(Error::Tool(format!(
-                "page '{page}' is not a regular file"
-            )));
+            return Err(Error::Tool(format!("page '{page}' is not a regular file")));
         }
         Ok(candidate)
     }
@@ -486,6 +483,9 @@ mod tests {
         symlink(target.path(), kms_root.join("evil")).unwrap();
 
         // resolve() should not return a KmsRef for a symlinked dir.
-        assert!(resolve("evil").is_none(), "symlinked KMS dir should be rejected");
+        assert!(
+            resolve("evil").is_none(),
+            "symlinked KMS dir should be rejected"
+        );
     }
 }

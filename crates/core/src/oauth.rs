@@ -42,6 +42,14 @@ pub struct TokenEntry {
     pub token_endpoint: String,
     /// Unix timestamp when the access token expires (0 = unknown).
     pub expires_at: u64,
+    /// Origin (scheme+host+port) of the authorization server that issued
+    /// this token. Used on retrieval to reject token reuse if an attacker
+    /// swaps the MCP server's OAuth discovery to point at a different
+    /// authorization server. `None` on entries saved before this field
+    /// existed; such entries are treated as unvalidated and re-auth is
+    /// forced.
+    #[serde(default)]
+    pub authorization_server: Option<String>,
 }
 
 impl TokenStore {
@@ -57,17 +65,63 @@ impl TokenStore {
             .unwrap_or_default()
     }
 
+    /// Serialise + write atomically with `0600` permissions on Unix so
+    /// other users / processes on the machine can't read cached refresh
+    /// tokens. On Windows we rely on the default per-user ACL.
     pub fn save(&self) {
-        if let Some(path) = Self::path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        let Some(path) = Self::path() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let contents = serde_json::to_string_pretty(self).unwrap_or_default();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Open the file with 0600 explicitly on creation. If the
+            // file already exists with a more-permissive mode, tighten
+            // it defensively.
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                use std::io::Write;
+                let _ = f.write_all(contents.as_bytes());
             }
-            let _ = std::fs::write(path, serde_json::to_string_pretty(self).unwrap_or_default());
+            // Belt-and-suspenders: even if the file pre-existed with a
+            // looser mode, clamp it now.
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(&path, perms);
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::write(&path, &contents);
         }
     }
 
     pub fn get(&self, server_url: &str) -> Option<&TokenEntry> {
         self.tokens.get(server_url)
+    }
+
+    /// Retrieve a cached token entry only if its authorization server
+    /// matches the currently-discovered one. Callers that just did
+    /// OAuth discovery can pass the `expected_as_origin` to defend
+    /// against cross-server token reuse (e.g. DNS hijack swapping the
+    /// OAuth server underneath a previously-trusted MCP URL).
+    pub fn get_validated(&self, server_url: &str, expected_as_origin: &str) -> Option<&TokenEntry> {
+        let entry = self.tokens.get(server_url)?;
+        match entry.authorization_server.as_deref() {
+            Some(origin) if origin == expected_as_origin => Some(entry),
+            _ => None,
+        }
     }
 
     pub fn set(&mut self, server_url: &str, entry: TokenEntry) {
@@ -89,6 +143,27 @@ pub struct OAuthMetadata {
     pub token_endpoint: String,
     pub registration_endpoint: Option<String>,
     pub scopes_supported: Vec<String>,
+    /// Origin (scheme://host[:port]) of the authorization server that
+    /// advertised these endpoints. Cached alongside issued tokens so a
+    /// later discovery that points at a *different* AS cannot silently
+    /// reuse a previously-issued token.
+    pub authorization_server_origin: String,
+}
+
+/// Extract a scheme+host+port origin from a URL string. Returns the
+/// trimmed input if parsing fails so callers always get a non-empty
+/// fingerprint.
+fn origin_of(url_str: &str) -> String {
+    match url::Url::parse(url_str) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("");
+            match u.port() {
+                Some(p) => format!("{}://{}:{}", u.scheme(), host, p),
+                None => format!("{}://{}", u.scheme(), host),
+            }
+        }
+        Err(_) => url_str.trim_end_matches('/').to_string(),
+    }
 }
 
 /// Discover the OAuth authorization server for an MCP HTTP endpoint.
@@ -168,40 +243,56 @@ pub async fn discover(client: &Client, mcp_url: &str) -> Result<OAuthMetadata> {
         })
         .unwrap_or_default();
 
+    let authorization_server_origin = origin_of(&auth_server);
+
     Ok(OAuthMetadata {
         authorization_endpoint,
         token_endpoint,
         registration_endpoint,
         scopes_supported,
+        authorization_server_origin,
     })
 }
 
 // ── PKCE ─────────────────────────────────────────────────────────────
 
-fn generate_pkce() -> (String, String) {
+/// Fill `buf` with cryptographically-random bytes. OAuth state + PKCE
+/// security depends on this — if the CSPRNG is unavailable we hard-fail
+/// rather than silently degrading to a timestamp-derived value that an
+/// attacker on the same machine could predict within microseconds.
+fn secure_random(buf: &mut [u8]) -> Result<()> {
+    getrandom::getrandom(buf).map_err(|e| {
+        Error::Provider(format!(
+            "OS CSPRNG unavailable for OAuth security: {e}. Refusing to proceed."
+        ))
+    })
+}
+
+fn generate_pkce() -> Result<(String, String)> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     use sha2::{Digest, Sha256};
 
     let mut verifier_bytes = [0u8; 32];
-    getrandom::getrandom(&mut verifier_bytes).unwrap_or_else(|_| {
-        // fallback: use timestamp nanos as entropy (not cryptographic, but
-        // functional for a local desktop app).
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        for (i, b) in verifier_bytes.iter_mut().enumerate() {
-            *b = ((t >> (i % 16)) & 0xff) as u8;
-        }
-    });
+    secure_random(&mut verifier_bytes)?;
     let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
     let code_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
 
-    (code_verifier, code_challenge)
+    Ok((code_verifier, code_challenge))
+}
+
+/// 128-bit (16-byte) random token encoded as URL-safe base64. Used for
+/// the OAuth `state` parameter. 64 bits (prior implementation) was below
+/// the RFC 6234 recommendation and brute-force / precompute-feasible.
+fn generate_state() -> Result<String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let mut bytes = [0u8; 16];
+    secure_random(&mut bytes)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 // ── Authorization flow ───────────────────────────────────────────────
@@ -215,8 +306,8 @@ pub async fn authorize(
     meta: &OAuthMetadata,
     _mcp_url: &str,
 ) -> Result<TokenEntry> {
-    let (code_verifier, code_challenge) = generate_pkce();
-    let state = format!("{:x}", rand_u64());
+    let (code_verifier, code_challenge) = generate_pkce()?;
+    let state = generate_state()?;
 
     // Find a free local port for the callback server.
     let listener = find_listener().await?;
@@ -305,6 +396,7 @@ pub async fn authorize(
         refresh_token,
         token_endpoint: meta.token_endpoint.clone(),
         expires_at: now + expires_in,
+        authorization_server: Some(meta.authorization_server_origin.clone()),
     })
 }
 
@@ -360,6 +452,7 @@ pub async fn refresh(client: &Client, entry: &TokenEntry) -> Result<TokenEntry> 
         refresh_token: new_refresh,
         token_endpoint: entry.token_endpoint.clone(),
         expires_at: now + expires_in,
+        authorization_server: entry.authorization_server.clone(),
     })
 }
 
@@ -468,14 +561,101 @@ fn open_browser(url: &str) {
     }
 }
 
-fn rand_u64() -> u64 {
-    let mut buf = [0u8; 8];
-    getrandom::getrandom(&mut buf).unwrap_or_else(|_| {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        buf = (t as u64).to_le_bytes();
-    });
-    u64::from_le_bytes(buf)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct HomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn scoped_home() -> HomeGuard {
+        // Share the crate-wide env lock with kms tests to avoid racing
+        // each other on HOME / cwd.
+        let lock = crate::kms::test_env_lock();
+        let prev = std::env::var("HOME").ok();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+        HomeGuard {
+            _lock: lock,
+            prev,
+            _dir: dir,
+        }
+    }
+
+    fn sample_entry(issuer: Option<&str>) -> TokenEntry {
+        TokenEntry {
+            access_token: "at".into(),
+            refresh_token: Some("rt".into()),
+            token_endpoint: "https://as.example/token".into(),
+            expires_at: 0,
+            authorization_server: issuer.map(String::from),
+        }
+    }
+
+    #[test]
+    fn state_is_high_entropy_and_unique() {
+        let a = generate_state().unwrap();
+        let b = generate_state().unwrap();
+        assert_ne!(a, b);
+        // 16 bytes → base64url without padding = 22 chars
+        assert!(a.len() >= 22);
+        assert!(b.len() >= 22);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_file_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = scoped_home();
+        let mut store = TokenStore::default();
+        store.set(
+            "https://mcp.example",
+            sample_entry(Some("https://as.example")),
+        );
+        let path = TokenStore::path().unwrap();
+        assert!(path.exists(), "token file should have been created");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token file must be 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn get_validated_rejects_mismatched_authorization_server() {
+        let _home = scoped_home();
+        let mut store = TokenStore::default();
+        store.set(
+            "https://mcp.example",
+            sample_entry(Some("https://as-legit.example")),
+        );
+        // Same URL, different AS origin → must be treated as missing.
+        assert!(store
+            .get_validated("https://mcp.example", "https://as-legit.example")
+            .is_some());
+        assert!(store
+            .get_validated("https://mcp.example", "https://as-evil.example")
+            .is_none());
+    }
+
+    #[test]
+    fn get_validated_rejects_legacy_entries_without_issuer() {
+        let _home = scoped_home();
+        let mut store = TokenStore::default();
+        store.set("https://mcp.example", sample_entry(None));
+        assert!(store
+            .get_validated("https://mcp.example", "https://as.example")
+            .is_none());
+        // But the raw `get` still returns it so we can garbage-collect.
+        assert!(store.get("https://mcp.example").is_some());
+    }
 }

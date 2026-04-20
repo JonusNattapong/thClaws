@@ -234,7 +234,10 @@ impl Provider for GeminiProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!("http {status}: {}", super::redact_key(&text, &self.api_key))));
+            return Err(Error::Provider(format!(
+                "http {status}: {}",
+                super::redact_key(&text, &self.api_key)
+            )));
         }
         let v: Value = resp
             .json()
@@ -284,7 +287,10 @@ impl Provider for GeminiProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!("http {status}: {}", super::redact_key(&text, &self.api_key))));
+            return Err(Error::Provider(format!(
+                "http {status}: {}",
+                super::redact_key(&text, &self.api_key)
+            )));
         }
 
         let byte_stream = resp.bytes_stream();

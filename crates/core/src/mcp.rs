@@ -64,6 +64,126 @@ fn default_transport() -> String {
     "stdio".into()
 }
 
+// ── MCP stdio spawn allowlist ────────────────────────────────────────
+
+/// Path to the persistent per-user allowlist of MCP stdio commands.
+fn mcp_allowlist_path() -> Option<std::path::PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        std::path::PathBuf::from(xdg)
+    } else {
+        let home = std::env::var("HOME").ok()?;
+        std::path::PathBuf::from(home).join(".config")
+    };
+    Some(base.join("thclaws").join("mcp_allowlist.json"))
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct McpAllowlist {
+    /// Approved stdio commands. We key by the `command` string as it
+    /// appears in the MCP config. Users who change PATH or substitute
+    /// the binary will re-trigger approval if the command string differs.
+    #[serde(default)]
+    commands: Vec<String>,
+}
+
+impl McpAllowlist {
+    fn load() -> Self {
+        let Some(path) = mcp_allowlist_path() else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    fn save(&self) {
+        let Some(path) = mcp_allowlist_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let json = serde_json::to_string_pretty(self).unwrap_or_default();
+        let _ = std::fs::write(&path, json);
+    }
+
+    fn contains(&self, cmd: &str) -> bool {
+        self.commands.iter().any(|c| c == cmd)
+    }
+
+    fn insert(&mut self, cmd: &str) {
+        if !self.contains(cmd) {
+            self.commands.push(cmd.to_string());
+        }
+    }
+}
+
+/// Gate an MCP stdio spawn through an allowlist. The first time we see
+/// a given command string, prompt the user on the controlling TTY to
+/// approve it. If no TTY is attached (daemon / GUI path), refuse —
+/// the caller should route approval through a UI dialog.
+fn check_stdio_command_allowed(config: &McpServerConfig) -> Result<()> {
+    // An explicit environment override lets CI and the GUI bypass the
+    // TTY prompt once they have surfaced approval through their own UI.
+    if std::env::var("THCLAWS_MCP_ALLOW_ALL").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
+
+    let mut allowlist = McpAllowlist::load();
+    if allowlist.contains(&config.command) {
+        return Ok(());
+    }
+
+    // Require a TTY to prompt; otherwise fail closed.
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(Error::Provider(format!(
+            "mcp spawn refused: command `{}` for server `{}` is not in the \
+             user allowlist. Approve it by running thclaws interactively \
+             once, editing {}, or setting THCLAWS_MCP_ALLOW_ALL=1 in a \
+             trusted context.",
+            config.command,
+            config.name,
+            mcp_allowlist_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<no config dir>".into())
+        )));
+    }
+
+    eprintln!();
+    eprintln!("\x1b[33m[mcp] New MCP stdio server wants to spawn:\x1b[0m");
+    eprintln!("      name:    {}", config.name);
+    eprintln!("      command: {}", config.command);
+    if !config.args.is_empty() {
+        eprintln!("      args:    {}", config.args.join(" "));
+    }
+    eprintln!();
+    eprintln!("This will run the binary with your user privileges. Only");
+    eprintln!("approve if you trust the MCP config that requested it.");
+    eprint!("Approve and remember? [y/N] ");
+    use std::io::{BufRead, Write};
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let stdin = std::io::stdin();
+    let _ = stdin.lock().read_line(&mut line);
+    let answer = line.trim().to_ascii_lowercase();
+    if answer == "y" || answer == "yes" {
+        allowlist.insert(&config.command);
+        allowlist.save();
+        eprintln!(
+            "\x1b[32m[mcp] `{}` added to allowlist.\x1b[0m",
+            config.command
+        );
+        Ok(())
+    } else {
+        Err(Error::Provider(format!(
+            "mcp spawn refused by user: {}",
+            config.command
+        )))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpToolInfo {
     pub name: String,
@@ -154,6 +274,14 @@ impl McpClient {
         if config.transport == "http" {
             return Self::connect_http(config).await;
         }
+
+        // Allowlist gate: MCP stdio configs come from project-scoped
+        // JSON files that a user may have cloned from the internet. A
+        // malicious `.thclaws/mcp.json` could point `command` at an
+        // arbitrary binary. Require explicit per-command approval the
+        // first time we see it and persist the decision.
+        check_stdio_command_allowed(&config)?;
+
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
             .stdin(std::process::Stdio::piped())
@@ -886,9 +1014,25 @@ async fn resolve_oauth_token(
 ) -> Option<String> {
     let mut store = crate::oauth::TokenStore::load();
 
-    // Try refresh first.
-    if let Some(entry) = store.get(mcp_url) {
-        if !crate::oauth::is_valid(entry) && entry.refresh_token.is_some() {
+    // Full OAuth discovery up front — we need the authorization-server
+    // origin to verify that any cached entry was issued by the SAME AS
+    // currently advertised for this MCP URL. This blocks token-cache
+    // confusion if an attacker swaps the advertised AS under a
+    // previously-trusted MCP URL.
+    let meta = match crate::oauth::discover(client, mcp_url).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("\x1b[31m[mcp-http] {server_name}: OAuth discovery failed: {e}\x1b[0m");
+            return None;
+        }
+    };
+    let expected_as = meta.authorization_server_origin.clone();
+
+    if let Some(entry) = store.get_validated(mcp_url, &expected_as) {
+        if crate::oauth::is_valid(entry) {
+            return Some(entry.access_token.clone());
+        }
+        if entry.refresh_token.is_some() {
             eprintln!("\x1b[36m[mcp-http] {server_name}: refreshing expired token…\x1b[0m");
             match crate::oauth::refresh(client, entry).await {
                 Ok(new_entry) => {
@@ -900,19 +1044,15 @@ async fn resolve_oauth_token(
                     store.remove(mcp_url);
                 }
             }
-        } else if crate::oauth::is_valid(entry) {
-            return Some(entry.access_token.clone());
         }
+    } else if store.get(mcp_url).is_some() {
+        // Entry exists but is either legacy (no AS binding) or bound to
+        // a different AS. Treat as untrusted and re-authorize.
+        eprintln!(
+            "\x1b[33m[mcp-http] {server_name}: cached token not bound to current authorization server — re-authorizing\x1b[0m"
+        );
+        store.remove(mcp_url);
     }
-
-    // Full OAuth discovery + browser flow.
-    let meta = match crate::oauth::discover(client, mcp_url).await {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("\x1b[31m[mcp-http] {server_name}: OAuth discovery failed: {e}\x1b[0m");
-            return None;
-        }
-    };
 
     match crate::oauth::authorize(client, &meta, mcp_url).await {
         Ok(entry) => {
