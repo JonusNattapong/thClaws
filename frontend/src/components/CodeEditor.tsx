@@ -14,13 +14,21 @@ import { yaml } from "@codemirror/lang-yaml";
 import { markdown } from "@codemirror/lang-markdown";
 import { xml } from "@codemirror/lang-xml";
 import { sql } from "@codemirror/lang-sql";
+import { go } from "@codemirror/lang-go";
+import { java } from "@codemirror/lang-java";
+import { cpp } from "@codemirror/lang-cpp";
+import { php } from "@codemirror/lang-php";
 import type { Extension } from "@codemirror/state";
 
 interface Props {
   source: string;
   path: string;
-  onChange: (text: string) => void;
+  onChange?: (text: string) => void;
   onSave?: () => void;
+  /** When true, the editor is view-only: no cursor, no edits, no save
+   *  keybinding fires. Used for the Files-tab preview pane so code
+   *  files get the same syntax highlighting as in edit mode. */
+  readOnly?: boolean;
 }
 
 function languageForExtension(ext: string): Extension {
@@ -48,6 +56,7 @@ function languageForExtension(ext: string): Extension {
     case "rs":
       return rust();
     case "json":
+    case "jsonc":
       return json();
     case "yaml":
     case "yml":
@@ -60,6 +69,21 @@ function languageForExtension(ext: string): Extension {
       return xml();
     case "sql":
       return sql();
+    case "go":
+      return go();
+    case "java":
+    case "kt":
+      return java();
+    case "c":
+    case "cpp":
+    case "cc":
+    case "cxx":
+    case "h":
+    case "hpp":
+    case "hh":
+      return cpp();
+    case "php":
+      return php();
     default:
       return [];
   }
@@ -70,7 +94,13 @@ function languageForExtension(ext: string): Extension {
 // the light media query it still reads fine). `onSave` is bound to
 // Cmd/Ctrl-S via a prepended keymap so `EditorView.defaultKeymap`
 // still handles everything else.
-export function CodeEditor({ source, path, onChange, onSave }: Props) {
+export function CodeEditor({
+  source,
+  path,
+  onChange,
+  onSave,
+  readOnly = false,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   // Latest handlers in refs so the editor-creation effect doesn't
@@ -89,48 +119,57 @@ export function CodeEditor({ source, path, onChange, onSave }: Props) {
     const ext = path.split(".").pop()?.toLowerCase() ?? "";
     const languagePack = languageForExtension(ext);
 
-    const saveBinding = keymap.of([
-      {
-        key: "Mod-s",
-        preventDefault: true,
-        run: () => {
-          onSaveRef.current?.();
-          return true;
+    const extensions: Extension[] = [
+      basicSetup,
+      oneDark,
+      languageCompartment.current.of(languagePack),
+      EditorView.theme({
+        "&": { height: "100%", fontSize: "13px" },
+        ".cm-scroller": {
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         },
-      },
-      indentWithTab,
-      ...defaultKeymap,
-    ]);
+      }),
+    ];
 
-    const state = EditorState.create({
-      doc: source,
-      extensions: [
-        saveBinding,
-        basicSetup,
-        oneDark,
-        languageCompartment.current.of(languagePack),
+    if (readOnly) {
+      extensions.push(
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+      );
+    } else {
+      extensions.push(
+        keymap.of([
+          {
+            key: "Mod-s",
+            preventDefault: true,
+            run: () => {
+              onSaveRef.current?.();
+              return true;
+            },
+          },
+          indentWithTab,
+          ...defaultKeymap,
+        ]),
         EditorView.updateListener.of((u) => {
           if (u.docChanged) {
-            onChangeRef.current(u.state.doc.toString());
+            onChangeRef.current?.(u.state.doc.toString());
           }
         }),
-        EditorView.theme({
-          "&": { height: "100%", fontSize: "13px" },
-          ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" },
-        }),
-      ],
-    });
+      );
+    }
+
+    const state = EditorState.create({ doc: source, extensions });
     const view = new EditorView({ state, parent: containerRef.current });
     viewRef.current = view;
     return () => {
       view.destroy();
       viewRef.current = null;
     };
-    // Re-create when the file path changes (switching files). Source
-    // is seeded on mount; subsequent source changes are handled by
-    // the second effect below.
+    // Re-create when the file path or readOnly flag flips (switching
+    // files, toggling preview ↔ edit). Source-only changes are handled
+    // by the second effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path]);
+  }, [path, readOnly]);
 
   // Replace document content when the source prop changes externally
   // (file reload from disk) without losing editor state if the new

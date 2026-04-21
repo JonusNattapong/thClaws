@@ -58,10 +58,22 @@ type ReadMode = "preview" | "source";
 const TEXT_EDITABLE = new Set([
   "md", "markdown", "html", "htm", "js", "jsx", "mjs", "cjs", "ts", "tsx",
   "css", "scss", "sass", "less", "py", "pyi", "rs", "go", "java", "kt",
-  "swift", "c", "cpp", "h", "hpp", "cs", "rb", "php", "sh", "bash", "zsh",
-  "fish", "json", "jsonc", "yaml", "yml", "toml", "xml", "svg", "sql",
-  "lua", "vim", "Dockerfile", "dockerfile", "ini", "conf", "env",
-  "gitignore", "txt", "log",
+  "swift", "c", "cpp", "cc", "cxx", "h", "hpp", "hh", "cs", "rb", "php",
+  "sh", "bash", "zsh", "fish", "json", "jsonc", "yaml", "yml", "toml",
+  "xml", "svg", "sql", "lua", "vim", "Dockerfile", "dockerfile", "ini",
+  "conf", "env", "gitignore", "txt", "log",
+]);
+
+// Subset of TEXT_EDITABLE for which we actually want the preview pane
+// to render through CodeMirror (syntax highlighting + line numbers)
+// instead of a plain <pre>. Plain-text extensions stay in <pre> since
+// CodeMirror wouldn't add anything useful there.
+const SYNTAX_PREVIEW = new Set([
+  "js", "jsx", "mjs", "cjs", "ts", "tsx",
+  "html", "htm", "css", "scss", "sass", "less",
+  "py", "pyi", "rs", "go", "java", "kt",
+  "c", "cpp", "cc", "cxx", "h", "hpp", "hh",
+  "php", "json", "jsonc", "yaml", "yml", "xml", "svg", "sql",
 ]);
 
 function extOf(path: string): string {
@@ -257,6 +269,8 @@ export function FilesView({ active }: Props) {
   const isImage = preview?.mime.startsWith("image/");
   const isPdf = preview?.mime === "application/pdf";
   const canEdit = preview && isTextEditable(preview.path);
+  const hasSyntaxPreview =
+    preview && SYNTAX_PREVIEW.has(extOf(preview.path));
 
   return (
     <div className="flex h-full" style={{ background: "var(--bg-primary)" }}>
@@ -422,6 +436,12 @@ export function FilesView({ active }: Props) {
                 style={{ borderColor: "var(--border)", background: "#fff" }}
                 sandbox="allow-scripts"
                 title={preview.path}
+              />
+            ) : hasSyntaxPreview ? (
+              <CodeEditor
+                source={preview.content}
+                path={preview.path}
+                readOnly
               />
             ) : (
               <pre
