@@ -148,12 +148,13 @@ export function FilesView({ active }: Props) {
   const onSidebarClick = (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
     if (mode === "edit" && editorDirty) {
-      // Queue the file open for after a successful save, ask the user.
-      const proceed = window.confirm(
-        "You have unsaved changes. Discard and open the new file?"
-      );
-      if (!proceed) return;
-      setEditorDirty(false);
+      // Don't open the new file while the user has unsaved work. Nudge
+      // them to save or discard first — we can't use `window.confirm`
+      // because wry WebViews don't implement it consistently, and
+      // silently opening would lose their edits.
+      setSaveToast("save or discard current edits first");
+      setTimeout(() => setSaveToast(null), 2500);
+      return;
     }
     openFile(path);
   };
@@ -164,15 +165,15 @@ export function FilesView({ active }: Props) {
     send({ type: "file_read", path: preview.path, mode: "source" });
   };
 
+  // The Discard button is only shown when `editorDirty` is true, and
+  // its label is literally "Discard" — that IS the confirmation.
+  // We don't layer a `window.confirm` on top because (a) it's
+  // redundant and (b) wry WebViews don't implement confirm reliably,
+  // which is what broke this button in the first place.
   const exitEditMode = () => {
-    if (editorDirty) {
-      const proceed = window.confirm(
-        "Discard unsaved changes and return to preview?"
-      );
-      if (!proceed) return;
-    }
     setMode("preview");
     setEditorDirty(false);
+    setEditorSource("");
     if (preview) {
       send({ type: "file_read", path: preview.path, mode: "preview" });
     }
@@ -197,7 +198,10 @@ export function FilesView({ active }: Props) {
     return () => window.removeEventListener("keydown", handler);
   }, [active, mode, save]);
 
-  // Warn on tab close / navigation when dirty.
+  // `beforeunload` in wry WebViews is a best-effort warning; if the
+  // native host ignores it, at least we're not losing data silently
+  // because the Discard button and "save or discard first" toast
+  // already guard the in-app flow.
   useEffect(() => {
     if (!editorDirty) return;
     const handler = (e: BeforeUnloadEvent) => {
