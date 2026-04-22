@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -30,7 +30,6 @@ uuid = { version = "1", features = ["v4"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 arboard = "3"
-portable-pty = { version = "0.9", optional = true }
 tao = { version = "0.34", optional = true }
 wry = { version = "0.54", optional = true }
 # Markdown → HTML for the Files-tab preview. GFM tables, strikethrough,
@@ -40,7 +39,7 @@ comrak = { version = "0.29", default-features = false, optional = true }
 
 [features]
 default = []
-gui = ["dep:tao", "dep:wry", "dep:portable-pty", "dep:comrak"]
+gui = ["dep:tao", "dep:wry", "dep:comrak"]
 
 [[bin]]
 name = "thclaws-cli"

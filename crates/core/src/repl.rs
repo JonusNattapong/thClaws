@@ -12,8 +12,8 @@ use crate::mcp::{McpClient, McpServerConfig, McpTool};
 use crate::memory::MemoryStore;
 use crate::permissions::{PermissionMode, ReplApprover};
 use crate::providers::{
-    anthropic::AnthropicProvider, anthropic_agent::AnthropicAgentProvider, gemini::GeminiProvider,
-    ollama::OllamaProvider, openai::OpenAIProvider, Provider, ProviderKind,
+    anthropic::AnthropicProvider, gemini::GeminiProvider, ollama::OllamaProvider,
+    openai::OpenAIProvider, Provider, ProviderKind,
 };
 use crate::session::{Session, SessionStore};
 use crate::subagent::{AgentFactory, SubAgentTool};
@@ -537,7 +537,6 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             ))
         }
         ProviderKind::Anthropic => Ok(Arc::new(AnthropicProvider::new(api_key))),
-        ProviderKind::AnthropicAgent => Ok(Arc::new(AnthropicAgentProvider::new(api_key))),
         ProviderKind::OpenAI => Ok(Arc::new(OpenAIProvider::new(api_key))),
         ProviderKind::OpenAIResponses => Ok(Arc::new(
             crate::providers::openai_responses::OpenAIResponsesProvider::new(api_key),
@@ -1814,8 +1813,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                         }
                         // Empty list or unsupported list_models → accept the
-                        // switch since we can't disprove the model. Agent-SDK
-                        // / managed-agent providers don't implement listing.
+                        // switch since we can't disprove the model. The
+                        // Agent-SDK provider (local claude subprocess) doesn't
+                        // implement listing.
                         _ => {}
                     }
                     // Flush any pending messages in the outgoing session
@@ -2585,14 +2585,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             "{COLOR_DIM}  add skills to .thclaws/skills/ or ~/.config/thclaws/skills/{COLOR_RESET}"
                         );
                     } else {
-                        let home = std::env::var("HOME").unwrap_or_default();
+                        let home = crate::util::home_dir().unwrap_or_default();
                         let project_prefix = std::env::current_dir()
                             .map(|p| p.join(".thclaws/skills"))
                             .unwrap_or_default();
-                        let user_prefix = std::path::PathBuf::from(&home)
-                            .join(".config/thclaws/skills");
-                        let claude_prefix = std::path::PathBuf::from(&home)
-                            .join(".claude/skills");
+                        let user_prefix = home.join(".config/thclaws/skills");
+                        let claude_prefix = home.join(".claude/skills");
 
                         let level_of = |dir: &std::path::Path| -> &str {
                             if dir.starts_with(&project_prefix) { "project" }
@@ -2627,12 +2625,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 }
                 SlashCommand::SkillShow(name) => {
                     let store = crate::skills::SkillStore::discover();
-                    let home = std::env::var("HOME").unwrap_or_default();
+                    let home = crate::util::home_dir().unwrap_or_default();
                     let project_prefix = std::env::current_dir()
                         .map(|p| p.join(".thclaws/skills"))
                         .unwrap_or_default();
-                    let user_prefix = std::path::PathBuf::from(&home)
-                        .join(".config/thclaws/skills");
+                    let user_prefix = home.join(".config/thclaws/skills");
                     let skill_level = |dir: &std::path::Path| -> &str {
                         if dir.starts_with(&project_prefix) { "project" }
                         else if dir.starts_with(&user_prefix) { "user" }

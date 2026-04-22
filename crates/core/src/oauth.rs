@@ -54,8 +54,7 @@ pub struct TokenEntry {
 
 impl TokenStore {
     fn path() -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        Some(PathBuf::from(home).join(".config/thclaws/oauth_tokens.json"))
+        crate::util::home_dir().map(|h| h.join(".config/thclaws/oauth_tokens.json"))
     }
 
     pub fn load() -> Self {

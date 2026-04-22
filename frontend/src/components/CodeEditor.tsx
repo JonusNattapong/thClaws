@@ -4,6 +4,7 @@ import { EditorView, keymap } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { defaultKeymap, indentWithTab } from "@codemirror/commands";
+import { useTheme } from "../hooks/useTheme";
 import { javascript } from "@codemirror/lang-javascript";
 import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
@@ -90,10 +91,10 @@ function languageForExtension(ext: string): Extension {
 }
 
 // CodeMirror 6 editor wrapper. Language pack is picked from the file
-// extension; theme is oneDark (dark-first, with our WebView theme in
-// the light media query it still reads fine). `onSave` is bound to
-// Cmd/Ctrl-S via a prepended keymap so `EditorView.defaultKeymap`
-// still handles everything else.
+// extension; the editor theme follows the app's resolved theme —
+// `oneDark` when dark, CodeMirror's default light highlighter when
+// light. `onSave` is bound to Cmd/Ctrl-S via a prepended keymap so
+// `EditorView.defaultKeymap` still handles everything else.
 export function CodeEditor({
   source,
   path,
@@ -103,6 +104,7 @@ export function CodeEditor({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const { resolved: themeMode } = useTheme();
   // Latest handlers in refs so the editor-creation effect doesn't
   // have to re-run every keystroke.
   const onChangeRef = useRef(onChange);
@@ -121,7 +123,7 @@ export function CodeEditor({
 
     const extensions: Extension[] = [
       basicSetup,
-      oneDark,
+      ...(themeMode === "dark" ? [oneDark] : []),
       languageCompartment.current.of(languagePack),
       EditorView.theme({
         "&": { height: "100%", fontSize: "13px" },
@@ -165,11 +167,11 @@ export function CodeEditor({
       view.destroy();
       viewRef.current = null;
     };
-    // Re-create when the file path or readOnly flag flips (switching
-    // files, toggling preview ↔ edit). Source-only changes are handled
-    // by the second effect below.
+    // Re-create when the file path, readOnly flag, or theme flips
+    // (switching files, toggling preview ↔ edit, light/dark swap).
+    // Source-only changes are handled by the second effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, readOnly]);
+  }, [path, readOnly, themeMode]);
 
   // Replace document content when the source prop changes externally
   // (file reload from disk) without losing editor state if the new

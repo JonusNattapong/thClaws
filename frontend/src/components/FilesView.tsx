@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Folder, File, ArrowUp, Pencil, Eye, Save, X } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
+import { useTheme } from "../hooks/useTheme";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CodeEditor } from "./CodeEditor";
 
@@ -94,6 +95,7 @@ function isMarkdownPath(path: string): boolean {
 export function FilesView({ active }: Props) {
   const [currentPath, setCurrentPath] = useState(".");
   const [entries, setEntries] = useState<FileEntry[]>([]);
+  const { resolved: themeMode } = useTheme();
 
   // The file being displayed. `content` is what the backend returned —
   // for preview mode of a `.md` file, that's the rendered HTML; for
@@ -158,20 +160,22 @@ export function FilesView({ active }: Props) {
 
   // Auto-refresh directory listing + preview while tab active.
   // Never auto-refresh when user is editing — we'd clobber their work.
+  // `themeMode` is a dep so a light/dark swap re-fetches the .md
+  // preview with the fresh palette baked into its iframe HTML.
   useEffect(() => {
     if (!active) return;
     send({ type: "file_list", path: currentPath });
     if (preview && mode === "preview") {
-      send({ type: "file_read", path: preview.path, mode: "preview" });
+      send({ type: "file_read", path: preview.path, mode: "preview", theme: themeMode });
     }
     const interval = setInterval(() => {
       send({ type: "file_list", path: currentPath });
       if (preview && mode === "preview") {
-        send({ type: "file_read", path: preview.path, mode: "preview" });
+        send({ type: "file_read", path: preview.path, mode: "preview", theme: themeMode });
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [active, currentPath, preview?.path, mode]);
+  }, [active, currentPath, preview?.path, mode, themeMode]);
 
   const navigate = (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
@@ -187,8 +191,8 @@ export function FilesView({ active }: Props) {
 
   const openFile = useCallback((path: string) => {
     setMode("preview");
-    send({ type: "file_read", path, mode: "preview" });
-  }, []);
+    send({ type: "file_read", path, mode: "preview", theme: themeMode });
+  }, [themeMode]);
 
   const onSidebarClick = async (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
@@ -228,7 +232,7 @@ export function FilesView({ active }: Props) {
     setEditorDirty(false);
     setEditorSource("");
     if (preview) {
-      send({ type: "file_read", path: preview.path, mode: "preview" });
+      send({ type: "file_read", path: preview.path, mode: "preview", theme: themeMode });
     }
   };
 
@@ -433,7 +437,7 @@ export function FilesView({ active }: Props) {
               <iframe
                 srcDoc={preview.content}
                 className="w-full flex-1 min-h-0 rounded border"
-                style={{ borderColor: "var(--border)", background: "#fff" }}
+                style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
                 sandbox="allow-scripts"
                 title={preview.path}
               />

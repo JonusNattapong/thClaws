@@ -15,8 +15,8 @@ import { send, subscribe } from "./hooks/useIPC";
 type Tab = "terminal" | "chat" | "files" | "team";
 
 const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: "terminal", label: "Terminal", icon: <Terminal size={14} /> },
   { id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
+  { id: "terminal", label: "Terminal", icon: <Terminal size={14} /> },
   { id: "files", label: "Files", icon: <FolderTree size={14} /> },
   { id: "team", label: "Team", icon: <Users size={14} /> },
 ];
@@ -32,6 +32,11 @@ function StartupModal({ onStart }: { onStart: (cwd: string) => void }) {
   const [showModal, setShowModal] = useState<boolean | null>(null);
   const [picking, setPicking] = useState(false);
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
+  // If we never hear back from the backend, flip this to show a
+  // diagnostic instead of an indefinite blank screen. Known-bad
+  // situation on some macOS x86 cross-compiled builds where the
+  // wry IPC bridge doesn't inject `window.ipc`.
+  const [ipcDead, setIpcDead] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -71,7 +76,17 @@ function StartupModal({ onStart }: { onStart: (cwd: string) => void }) {
       if (!gotResponse) send({ type: "get_cwd" });
       else clearInterval(retry);
     }, 100);
-    return () => { unsub(); clearInterval(retry); };
+    // Fallback: if we haven't heard back in 3 seconds the IPC bridge is
+    // almost certainly broken — show a readable error rather than an
+    // indefinite blank screen.
+    const deadline = setTimeout(() => {
+      if (!gotResponse) setIpcDead(true);
+    }, 3000);
+    return () => {
+      unsub();
+      clearInterval(retry);
+      clearTimeout(deadline);
+    };
   }, [onStart]);
 
   // Focus the input whenever cwd changes and the modal is visible.
@@ -80,13 +95,65 @@ function StartupModal({ onStart }: { onStart: (cwd: string) => void }) {
     if (showModal) inputRef.current?.focus();
   }, [cwd, showModal]);
 
-  // Still waiting for backend reply — show nothing.
+  // Still waiting for backend reply — show nothing, unless we've
+  // been waiting long enough to conclude the bridge is gone.
   if (showModal === null) {
+    if (!ipcDead) {
+      return (
+        <div
+          className="fixed inset-0 flex items-center justify-center"
+          style={{ background: "var(--bg-primary)" }}
+        />
+      );
+    }
+    // IPC dead-air fallback — diagnostic UI so the user isn't staring
+    // at a blank screen. Reachable on some macOS x86 cross-compiled
+    // builds where `window.ipc` doesn't get injected by wry.
+    const ipcPresent =
+      typeof (window as unknown as { ipc?: unknown }).ipc !== "undefined";
     return (
       <div
-        className="fixed inset-0 flex items-center justify-center"
-        style={{ background: "rgba(0,0,0,0.85)" }}
-      />
+        className="fixed inset-0 flex items-center justify-center p-6"
+        style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
+      >
+        <div
+          className="rounded-lg shadow-2xl p-6 max-w-xl w-full"
+          style={{
+            background: "var(--bg-secondary)",
+            border: "1px solid var(--border)",
+          }}
+        >
+          <h2 className="text-sm font-semibold mb-3">
+            thClaws couldn't reach its backend
+          </h2>
+          <p className="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
+            The frontend loaded, but no reply came back from the Rust side
+            after 3 seconds. Usually means the WebView↔Rust IPC bridge
+            failed to initialise — common on older macOS x86 builds or
+            when a dependency is blocked by security software.
+          </p>
+          <ul
+            className="text-[11px] list-disc pl-5 space-y-1 mb-3"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            <li>
+              <code className="font-mono">window.ipc</code> available:{" "}
+              <strong>{ipcPresent ? "yes" : "no (this is the problem)"}</strong>
+            </li>
+            <li>
+              Platform: <code className="font-mono">{navigator.platform}</code>
+            </li>
+            <li>UserAgent: <code className="font-mono">{navigator.userAgent.slice(0, 80)}…</code></li>
+          </ul>
+          <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
+            Try running with <code className="font-mono">THCLAWS_DEVTOOLS=1 thclaws</code>,
+            then right-click → Inspect to see the console. File an issue
+            at{" "}
+            <code className="font-mono">github.com/thClaws/thClaws/issues</code>{" "}
+            with the console output and these details.
+          </p>
+        </div>
+      </div>
     );
   }
 
@@ -99,7 +166,7 @@ function StartupModal({ onStart }: { onStart: (cwd: string) => void }) {
   return (
     <div
       className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: "rgba(0,0,0,0.85)" }}
+      style={{ background: "var(--modal-backdrop)" }}
     >
       <div
         className="rounded-lg shadow-2xl p-6 max-w-lg w-full mx-4"
@@ -209,8 +276,7 @@ export default function App() {
 
   const [started, setStarted] = useState(false);
   const [currentCwd, setCurrentCwd] = useState("");
-  const [activeTab, setActiveTab] = useState<Tab>("terminal");
-  const [hasTeam, setHasTeam] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>("chat");
   const [showSettings, setShowSettings] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [instructionsScope, setInstructionsScope] =
@@ -238,27 +304,13 @@ export default function App() {
     return unsub;
   }, []);
 
-  useEffect(() => {
-    const unsub = subscribe((msg) => {
-      if (msg.type === "team_status" && typeof msg.has_team === "boolean") {
-        setHasTeam(msg.has_team);
-      }
-    });
-    send({ type: "team_list" });
-    const interval = setInterval(() => send({ type: "team_list" }), 3000);
-    return () => {
-      unsub();
-      clearInterval(interval);
-    };
-  }, []);
+  // The Team tab is always present — TeamView renders an empty-state
+  // ("No team agents running — ask the agent to create a team") when
+  // there isn't one yet, so users don't have to flip a settings flag
+  // to discover the feature, and a freshly-created team's pane shows
+  // up the moment the user clicks the tab without waiting on a poll.
 
-  // If the team disappears (e.g. user deleted .thclaws/team/) while the Team
-  // tab is active, fall back to Terminal instead of leaving a dangling tab.
-  useEffect(() => {
-    if (!hasTeam && activeTab === "team") setActiveTab("terminal");
-  }, [hasTeam, activeTab]);
-
-  const TABS = hasTeam ? ALL_TABS : ALL_TABS.filter((t) => t.id !== "team");
+  const TABS = ALL_TABS;
 
   if (!started) {
     return <StartupModal onStart={(cwd) => { setCurrentCwd(cwd); setStarted(true); }} />;

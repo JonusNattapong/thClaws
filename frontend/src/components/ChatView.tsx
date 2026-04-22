@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect } from "react";
 import { send, subscribe } from "../hooks/useIPC";
+import { useTheme } from "../hooks/useTheme";
+import logoDark from "../assets/thClaws-logo-dark.png";
+import logoLight from "../assets/thClaws-logo-light.png";
 
 type ChatMessage = {
-  role: "user" | "assistant" | "tool";
+  role: "user" | "assistant" | "tool" | "system";
   content: string;
   toolName?: string;
 };
@@ -12,10 +15,19 @@ export function ChatView() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const { resolved: themeMode } = useTheme();
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
       switch (msg.type) {
+        case "chat_user_message":
+          // Echo of a prompt the user submitted (possibly from the
+          // Terminal tab — we render it as a user bubble either way).
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: msg.text as string },
+          ]);
+          break;
         case "chat_text_delta":
           setMessages((prev) => {
             const last = prev[prev.length - 1];
@@ -53,6 +65,12 @@ export function ChatView() {
             return prev;
           });
           break;
+        case "chat_slash_output":
+          setMessages((prev) => [
+            ...prev,
+            { role: "system", content: msg.text as string },
+          ]);
+          break;
         case "chat_done":
           setStreaming(false);
           break;
@@ -60,18 +78,25 @@ export function ChatView() {
           setMessages([]);
           setStreaming(false);
           break;
-        case "session_loaded":
+        case "chat_history_replaced":
           if (msg.messages && Array.isArray(msg.messages)) {
             setMessages(
-              (msg.messages as { role: string; content: string }[])
-                .filter((m) => m.role !== "system")
-                .map((m) => ({
-                  role: m.role === "assistant" ? "assistant" : m.role === "tool" ? "tool" : "user",
+              (msg.messages as { role: string; content: string }[]).map(
+                (m) => ({
+                  role:
+                    m.role === "assistant"
+                      ? "assistant"
+                      : m.role === "tool"
+                        ? "tool"
+                        : m.role === "system"
+                          ? "system"
+                          : "user",
                   content: m.content,
-                } as ChatMessage))
+                } as ChatMessage),
+              ),
             );
+            setStreaming(false);
           }
-          setStreaming(false);
           break;
       }
     });
@@ -82,47 +107,29 @@ export function ChatView() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSlashCommand = (text: string): boolean => {
-    const cmd = text.trim().toLowerCase();
-    if (cmd === "/exit" || cmd === "/quit" || cmd === "/q") {
-      send({ type: "new_session" }); // save + clear
-      // Close the window via a small delay to let save complete
-      setTimeout(() => window.close(), 200);
-      return true;
-    }
-    if (cmd === "/clear") {
-      send({ type: "new_session" });
-      return true;
-    }
-    if (cmd === "/help" || cmd === "/h" || cmd === "/?") {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content:
-            "Chat mode slash commands:\n" +
-            "/clear — save session + clear chat\n" +
-            "/exit, /quit — save session + close app\n" +
-            "/help — show this help\n\n" +
-            "For full slash commands, use the Terminal tab.",
-        },
-      ]);
-      return true;
-    }
-    return false;
-  };
-
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || streaming) return;
     const text = input.trim();
     setInput("");
-    if (text.startsWith("/") && handleSlashCommand(text)) {
+
+    // /exit and /quit close the window — handle locally so we get the
+    // window.close after the backend save round-trip. Everything else
+    // (including /clear, /help, every other slash command) goes to the
+    // shared session, which dispatches it and broadcasts the response
+    // back as a `chat_slash_output` system bubble.
+    const lower = text.toLowerCase();
+    if (lower === "/exit" || lower === "/quit" || lower === "/q") {
+      send({ type: "new_session" });
+      setTimeout(() => window.close(), 200);
       return;
     }
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
-    setStreaming(true);
-    send({ type: "chat_prompt", text });
+
+    // Don't optimistically add the user bubble — the backend will echo
+    // a `chat_user_message` back to us (it does so for both tabs). This
+    // keeps a single source of truth about what's in the conversation.
+    if (!text.startsWith("/")) setStreaming(true);
+    send({ type: "shell_input", text });
   };
 
   return (
@@ -134,36 +141,51 @@ export function ChatView() {
       >
         {messages.length === 0 && (
           <div
-            className="text-center mt-20 text-sm"
+            className="flex flex-col items-center mt-20 select-none"
             style={{ color: "var(--text-secondary)" }}
           >
-            Chat mode — send a message to start
+            <img
+              src={themeMode === "light" ? logoLight : logoDark}
+              alt="thClaws"
+              className="mb-4 opacity-90"
+              style={{ width: 280, height: 280 }}
+              draggable={false}
+            />
+            <div className="text-sm">Chat mode — send a message to start</div>
           </div>
         )}
         {messages.map((msg, i) => (
           <div
             key={i}
-            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+            className={`flex ${msg.role === "user" ? "justify-end" : msg.role === "system" ? "justify-center" : "justify-start"}`}
           >
             <div
               className="max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap"
               style={{
                 background:
                   msg.role === "user"
-                    ? "var(--accent-dim)"
+                    ? "var(--chat-user-bg)"
                     : msg.role === "tool"
                       ? "var(--bg-tertiary)"
-                      : "var(--bg-secondary)",
-                color: "var(--text-primary)",
+                      : msg.role === "system"
+                        ? "transparent"
+                        : "var(--bg-secondary)",
+                color:
+                  msg.role === "user"
+                    ? "var(--chat-user-fg)"
+                    : msg.role === "system"
+                      ? "var(--text-secondary)"
+                      : "var(--text-primary)",
                 border:
-                  msg.role === "tool"
+                  msg.role === "tool" || msg.role === "system"
                     ? "1px solid var(--border)"
                     : "none",
                 fontFamily:
-                  msg.role === "tool"
+                  msg.role === "tool" || msg.role === "system"
                     ? "Menlo, Monaco, monospace"
                     : "inherit",
-                fontSize: msg.role === "tool" ? "12px" : "14px",
+                fontSize:
+                  msg.role === "tool" || msg.role === "system" ? "12px" : "14px",
               }}
             >
               {msg.content}
@@ -201,7 +223,7 @@ export function ChatView() {
           className="px-4 py-2 rounded text-sm font-medium transition-colors"
           style={{
             background: streaming ? "var(--bg-tertiary)" : "var(--accent)",
-            color: streaming ? "var(--text-secondary)" : "#000",
+            color: streaming ? "var(--text-secondary)" : "var(--accent-fg)",
             cursor: streaming ? "not-allowed" : "pointer",
           }}
         >

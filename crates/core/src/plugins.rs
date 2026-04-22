@@ -193,8 +193,9 @@ impl PluginRegistry {
 
 fn registry_path(user: bool) -> Result<PathBuf> {
     if user {
-        let home = std::env::var("HOME").map_err(|_| Error::Config("HOME is not set".into()))?;
-        Ok(PathBuf::from(home).join(".config/thclaws/plugins.json"))
+        let home = crate::util::home_dir()
+            .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?;
+        Ok(home.join(".config/thclaws/plugins.json"))
     } else {
         let cwd = std::env::current_dir()?;
         Ok(cwd.join(".thclaws/plugins.json"))
@@ -203,8 +204,9 @@ fn registry_path(user: bool) -> Result<PathBuf> {
 
 fn plugins_dir(user: bool) -> Result<PathBuf> {
     if user {
-        let home = std::env::var("HOME").map_err(|_| Error::Config("HOME is not set".into()))?;
-        Ok(PathBuf::from(home).join(".config/thclaws/plugins"))
+        let home = crate::util::home_dir()
+            .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?;
+        Ok(home.join(".config/thclaws/plugins"))
     } else {
         let cwd = std::env::current_dir()?;
         Ok(cwd.join(".thclaws/plugins"))

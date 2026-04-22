@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-04-22
+
+### Added
+
+- **Shared in-process session backing both GUI tabs.** Terminal and Chat tabs now share one Agent + Session + history; typing in either contributes to the same conversation, and `/load` replays the transcript into both.
+- **Every REPL slash command works from the GUI.** `/model`, `/provider`, `/permissions`, `/thinking`, `/compact`, `/doctor`, `/mcp`, `/plugin`, `/skill`, `/kms`, `/team`, and the rest all execute identically in Terminal, Chat, and CLI.
+- **Live activation for mutations** (no restart required): `/mcp add` spawns the subprocess and registers its tools; `/skill install` refreshes the store and updates the system prompt; `/plugin install` picks up plugin-contributed skills immediately; `/kms use` / `/kms off` register and deregister tools on the fly.
+- **Agent Teams toggle in the Settings menu** — one-click on/off for `teamEnabled` without editing `settings.json`.
+- **Light/dark/system theme** — click the gear icon → Appearance. Covers app chrome, xterm terminal palette, CodeMirror editor, and Markdown preview; persists to `~/.config/thclaws/theme.json`.
+- **Files-tab viewer + editor** — syntax-highlighted preview (CodeMirror 6, ~40 languages), GFM markdown preview (comrak), TipTap markdown editor, CodeMirror code editor with dirty-state tracking and Cmd/Ctrl+S save.
+- **Chat tab welcome logo.** Team tab is always visible with an empty-state pointer.
+
+### Fixed
+
+- **Windows startup hang at the secrets-backend dialog.** Every `std::env::var("HOME")` site now goes through a cross-platform `home_dir()` helper that understands `%USERPROFILE%` and `%HOMEDRIVE%%HOMEPATH%`. Previously the silent `Error::Config("HOME is not set")` left the user staring at a silently re-enabled button.
+- **Multi-line paste in Terminal tab** submits as one prompt instead of firing one `shell_input` per line.
+- **Terminal assistant output concatenates** during streaming — previously each chunk erased the previous one.
+- **ANSI escape codes stripped from Chat bubbles** — slash-command output (`render_help`) no longer shows `[2m...[0m` junk.
+- **Ctrl+C on empty line cancels the in-flight turn** (was a no-op after the shared-session refactor).
+- **Team tab auto-shows** after `TeamCreate` — no longer gated on `teamEnabled`.
+- **`/provider X` falls back to the first available model** if the hardcoded default isn't in the live catalogue. `/model X` stays strict so typos fail loud.
+- **System-prompt grounding on `agent/*` provider** — the SDK subprocess doesn't receive thClaws's tool registry; when the user asks for teams from `agent/*`, the model is told honestly that team tools are unreachable and to switch provider.
+
+### Removed
+
+- **`managed/*` (Anthropic Managed Agents cloud) provider.** The Managed Agents API is designed for deploying long-running agents to Anthropic's cloud with server-side tool execution — a poor fit for a local interactive CLI where tool calls should hit the user's filesystem.
+
+### Diagnostics
+
+- `THCLAWS_DEVTOOLS=1` opens the WebView devtools so users can Inspect → Console on a blank screen.
+- Startup modal shows a diagnostic card after 3 seconds of IPC dead-air, listing `window.ipc` availability, platform, and UserAgent — instead of an indefinite blank screen.
+
+## [0.2.1] — 2026-04-21
+
 First public open-source release — version and date will be set on tag.
 
 ### Agent core

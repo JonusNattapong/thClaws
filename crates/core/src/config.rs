@@ -482,8 +482,9 @@ pub fn remove_mcp_server(name: &str, user: bool) -> Result<(bool, PathBuf)> {
 
 fn mcp_config_path(user: bool) -> Result<PathBuf> {
     if user {
-        let home = std::env::var("HOME").map_err(|_| Error::Config("HOME is not set".into()))?;
-        Ok(PathBuf::from(home).join(".config/thclaws/mcp.json"))
+        let home = crate::util::home_dir()
+            .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?;
+        Ok(home.join(".config/thclaws/mcp.json"))
     } else {
         let cwd = std::env::current_dir()?;
         Ok(cwd.join(".thclaws").join("mcp.json"))
@@ -551,21 +552,21 @@ impl AppConfig {
 
     /// User-level config path: `~/.config/thclaws/settings.json`.
     pub fn user_config_paths() -> Vec<PathBuf> {
-        let Some(home) = std::env::var("HOME").ok() else {
+        let Some(home) = crate::util::home_dir() else {
             return vec![];
         };
-        vec![PathBuf::from(&home).join(".config/thclaws/settings.json")]
+        vec![home.join(".config/thclaws/settings.json")]
     }
 
     /// Load MCP servers from user-level paths:
     /// `~/.config/thclaws/mcp.json`, then `~/.claude/mcp.json` as fallback.
     fn load_user_mcp_servers() -> Vec<crate::mcp::McpServerConfig> {
-        let Some(home) = std::env::var("HOME").ok() else {
+        let Some(home) = crate::util::home_dir() else {
             return vec![];
         };
         let paths = [
-            PathBuf::from(&home).join(".config/thclaws/mcp.json"),
-            PathBuf::from(&home).join(".claude/mcp.json"),
+            home.join(".config/thclaws/mcp.json"),
+            home.join(".claude/mcp.json"),
         ];
         for path in &paths {
             if let Some(servers) = ProjectConfig::parse_mcp_json(path) {
@@ -580,8 +581,8 @@ impl AppConfig {
     /// Fallback: read Claude Code's `~/.claude/settings.json` if our config
     /// is missing. Extracts model, permission mode. Returns None if not found.
     pub fn load_claude_code_fallback() -> Option<Self> {
-        let home = std::env::var("HOME").ok()?;
-        let path = PathBuf::from(&home).join(".claude/settings.json");
+        let home = crate::util::home_dir()?;
+        let path = home.join(".claude/settings.json");
         let contents = std::fs::read_to_string(path).ok()?;
         let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
         let mut config = Self::default();

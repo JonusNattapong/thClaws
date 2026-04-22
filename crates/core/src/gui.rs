@@ -1,28 +1,22 @@
-//! Desktop GUI mode: wry webview serving embedded React frontend + PTY bridge.
+//! Desktop GUI mode: wry webview serving the embedded React frontend.
 //!
-//! The React dist/ is embedded at compile time via `include_dir!` and served
-//! via wry's custom protocol (`thclaws://`). The PTY bridge spawns `thclaws`
-//! (this same binary, without `--gui`) as a child process and bridges
-//! keystrokes / output between the webview and the PTY.
+//! The React dist/ is embedded at compile time via `include_str!` and
+//! served via wry's `with_html`. A single `SharedSession` (in
+//! `crate::shared_session`) owns one Agent and one Session that both
+//! the Terminal and Chat tabs render. Both tabs send user input via
+//! the `shell_input` IPC; both subscribe to a broadcast event stream
+//! that this module fans out to chat-shaped and terminal-shaped
+//! frontend dispatches.
 //!
 //! Only compiled when the `gui` feature is enabled.
 
 #![cfg(feature = "gui")]
 
-use crate::agent::{Agent, AgentEvent};
 use crate::config::AppConfig;
-use crate::context::ProjectContext;
-use crate::memory::MemoryStore;
-use crate::repl::build_provider;
 use crate::session::SessionStore;
-use crate::tools::ToolRegistry;
+use crate::shared_session::{ShellInput, SharedSessionHandle, ViewEvent};
 use base64::Engine;
-use futures::StreamExt;
-use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
-use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -33,115 +27,314 @@ use wry::WebViewBuilder;
 const FRONTEND_HTML: &str = include_str!("../../../frontend/dist/index.html");
 
 enum UserEvent {
-    PtyData(String),
-    PtyExit,
+    /// Generic frontend dispatch — payload is a complete JSON message
+    /// the frontend's `__thclaws_dispatch` will parse and route.
+    Dispatch(String),
     SendInitialState,
-    ChatTextDelta(String),
-    ChatToolCall(String),
-    ChatToolResult(String, String),
-    ChatDone,
     SessionLoaded(String),
     SessionListRefresh(String),
     FileTree(String),
     FileContent(String),
 }
 
-enum ChatCommand {
-    Prompt(String),
-    LoadHistory(Vec<crate::types::Message>),
-    NewSession,
-    SaveAndQuit,
-}
+const MAX_RECENT_DIRS: usize = 3;
 
-struct PtyBridge {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-}
+// ── Event translator ────────────────────────────────────────────────
+// Subscribes to the SharedSession's broadcast channel and fans each
+// ViewEvent out to two frontend dispatches: a chat-shaped JSON message
+// (`chat_text_delta`, `chat_tool_call`, `chat_history_replaced`, …)
+// and a terminal-shaped one (`terminal_data` carrying base64 ANSI
+// bytes). Both tabs subscribe to their respective shapes and render
+// the same conversation.
 
-impl PtyBridge {
-    fn spawn(cmd: &str, args: &[&str], cols: u16, rows: u16) -> Result<Self, String> {
-        let pty_system = NativePtySystem::default();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| format!("openpty: {e}"))?;
-        let mut builder = CommandBuilder::new(cmd);
-        for a in args {
-            builder.arg(*a);
-        }
-        // Inherit parent's cwd + full environment so the child process
-        // finds ~/.config/thclaws/settings.json, .env files, and PATH.
-        if let Ok(cwd) = std::env::current_dir() {
-            builder.cwd(cwd);
-        }
-        for (key, val) in std::env::vars() {
-            builder.env(key, val);
-        }
-        let child = pair
-            .slave
-            .spawn_command(builder)
-            .map_err(|e| format!("spawn: {e}"))?;
-        drop(pair.slave);
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| format!("writer: {e}"))?;
-        Ok(Self {
-            master: pair.master,
-            writer,
-            child,
-        })
-    }
-
-    fn start_reader(
-        &self,
-        proxy: EventLoopProxy<UserEvent>,
-    ) -> Result<thread::JoinHandle<()>, String> {
-        let mut reader = self
-            .master
-            .try_clone_reader()
-            .map_err(|e| format!("reader: {e}"))?;
-        Ok(thread::spawn(move || {
-            let mut buf = [0u8; 8192];
+fn spawn_event_translator(
+    handle: &SharedSessionHandle,
+    proxy: EventLoopProxy<UserEvent>,
+) {
+    let mut rx = handle.subscribe();
+    std::thread::spawn(move || {
+        // tokio runtime so we can `.recv().await` on the broadcast.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("translator runtime");
+        rt.block_on(async move {
             loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                        let _ = proxy.send_event(UserEvent::PtyData(encoded));
+                match rx.recv().await {
+                    Ok(ev) => {
+                        for dispatch in render_chat_dispatches(&ev) {
+                            let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
+                        }
+                        if let Some(ansi) = render_terminal_ansi(&ev) {
+                            let _ = proxy.send_event(UserEvent::Dispatch(
+                                terminal_data_envelope(&ansi),
+                            ));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Slow consumer dropped events; resync by replaying
+                        // a fresh "history replaced" with the agent's view
+                        // would need agent access — skip for now and hope
+                        // the next live event keeps state in sync.
+                        continue;
                     }
                     Err(_) => break,
                 }
             }
-            let _ = proxy.send_event(UserEvent::PtyExit);
-        }))
-    }
-
-    fn write(&mut self, data: &[u8]) {
-        let _ = self.writer.write_all(data);
-        let _ = self.writer.flush();
-    }
-
-    fn resize(&self, cols: u16, rows: u16) {
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
         });
-    }
+    });
+}
 
-    fn kill(&mut self) {
-        let _ = self.child.kill();
+/// Build chat-shaped JSON message(s) for a single ViewEvent. Most
+/// events translate to one message; HistoryReplaced fans out as a
+/// single `chat_history_replaced` envelope carrying the full message
+/// list.
+///
+/// All text fields are stripped of ANSI escape sequences — the chat
+/// bubble renders raw text in `whitespace-pre-wrap` and would show
+/// codes like `\x1b[2m...\x1b[0m` as visible `[2m...[0m` junk. The
+/// terminal path (which xterm.js parses natively) is unaffected.
+fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
+    match ev {
+        ViewEvent::UserPrompt(text) => vec![serde_json::json!({
+            "type": "chat_user_message",
+            "text": strip_ansi(text),
+        })
+        .to_string()],
+        ViewEvent::AssistantTextDelta(text) => vec![serde_json::json!({
+            "type": "chat_text_delta",
+            "text": strip_ansi(text),
+        })
+        .to_string()],
+        ViewEvent::ToolCallStart { name: _, label } => vec![serde_json::json!({
+            "type": "chat_tool_call",
+            "name": strip_ansi(label),
+        })
+        .to_string()],
+        ViewEvent::ToolCallResult { name, output } => vec![serde_json::json!({
+            "type": "chat_tool_result",
+            "name": name,
+            "output": strip_ansi(output),
+        })
+        .to_string()],
+        ViewEvent::SlashOutput(text) => vec![serde_json::json!({
+            "type": "chat_slash_output",
+            "text": strip_ansi(text),
+        })
+        .to_string()],
+        ViewEvent::TurnDone => vec![serde_json::json!({"type": "chat_done"}).to_string()],
+        ViewEvent::HistoryReplaced(messages) => {
+            let arr: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "role": m.role,
+                        "content": strip_ansi(&m.content),
+                    })
+                })
+                .collect();
+            vec![serde_json::json!({
+                "type": "chat_history_replaced",
+                "messages": arr,
+            })
+            .to_string()]
+        }
+        ViewEvent::SessionListRefresh(json) => vec![json.clone()],
+        ViewEvent::ErrorText(text) => vec![serde_json::json!({
+            "type": "chat_text_delta",
+            "text": format!("\n{}\n", strip_ansi(text)),
+        })
+        .to_string()],
     }
 }
 
-const MAX_RECENT_DIRS: usize = 3;
+/// Strip ANSI escape sequences from a string. Handles the common forms
+/// emitted by `repl::render_help` and tool output:
+///   - CSI sequences:   `ESC [ … (digits/semicolons) … (final byte 0x40-0x7e)`
+///   - OSC sequences:   `ESC ] … (terminator BEL or ST)`
+///   - Bare `ESC X`     where X is any single byte (Fe escape)
+///
+/// Doesn't try to convert colours into anything else — the chat bubble
+/// is plain text, and the user is just asking us to stop leaking
+/// terminal junk into it.
+fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'[' => {
+                    // CSI: skip parameters/intermediates until a final
+                    // byte in 0x40..=0x7e.
+                    i += 2;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1; // consume the final byte
+                    }
+                    continue;
+                }
+                b']' => {
+                    // OSC: terminate on BEL (0x07) or ST (ESC \).
+                    i += 2;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == 0x1b
+                            && i + 1 < bytes.len()
+                            && bytes[i + 1] == b'\\'
+                        {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+                _ => {
+                    // Two-byte Fe escape: drop both.
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        // Pass through. Multi-byte UTF-8 sequences are preserved
+        // intact because we operate at the byte level and only consume
+        // ESC-prefixed sequences.
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Output bytes are guaranteed valid UTF-8: we either passed through
+    // bytes from the original (valid) UTF-8 input or skipped them. The
+    // ASCII escape bytes we drop are never inside a multi-byte run.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod ansi_strip_tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strips_csi_sgr() {
+        assert_eq!(strip_ansi("\x1b[2mhello\x1b[0m"), "hello");
+        assert_eq!(strip_ansi("\x1b[31;1mred bold\x1b[0m text"), "red bold text");
+    }
+
+    #[test]
+    fn strips_cursor_moves() {
+        assert_eq!(strip_ansi("a\x1b[2K\rb"), "a\rb");
+    }
+
+    #[test]
+    fn passes_plain_text_through() {
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("with\nnewlines"), "with\nnewlines");
+    }
+
+    #[test]
+    fn strips_osc_with_bel() {
+        assert_eq!(strip_ansi("\x1b]0;title\x07after"), "after");
+    }
+}
+
+/// Convert a ViewEvent into ANSI bytes suitable for xterm.js. Returns
+/// None when the event is metadata-only (e.g. a SessionListRefresh —
+/// the sidebar handles that via its own dispatch shape).
+fn render_terminal_ansi(ev: &ViewEvent) -> Option<String> {
+    match ev {
+        ViewEvent::UserPrompt(text) => {
+            // Multi-line prompts (typical from a paste): `> ` marker on
+            // the first line only, two-space indent on continuations
+            // so the block reads as a single message. Convert `\n` →
+            // `\r\n` so xterm returns to column 0 instead of staircasing.
+            let marker = "\x1b[2m> \x1b[0m";
+            let indent = "  ";
+            let mut lines = text.split('\n');
+            let mut body = String::new();
+            if let Some(first) = lines.next() {
+                body.push_str(&format!("{marker}{first}"));
+            }
+            for line in lines {
+                body.push_str("\r\n");
+                body.push_str(indent);
+                body.push_str(line);
+            }
+            body.push_str("\r\n");
+            Some(body)
+        }
+        ViewEvent::AssistantTextDelta(text) => {
+            // Newlines from the model arrive as plain `\n`; xterm needs
+            // `\r\n` to start a fresh line at column 0.
+            Some(text.replace('\n', "\r\n"))
+        }
+        ViewEvent::ToolCallStart { name: _, label } => {
+            Some(format!("\r\n\x1b[2m[tool: {label}]\x1b[0m"))
+        }
+        ViewEvent::ToolCallResult { .. } => Some(" \x1b[32m✓\x1b[0m".to_string()),
+        ViewEvent::SlashOutput(text) => {
+            let body = text.replace('\n', "\r\n");
+            Some(format!("\x1b[2m{body}\x1b[0m\r\n"))
+        }
+        // TurnDone doesn't emit terminal bytes — TerminalView's
+        // `chat_done` handler writes the next prompt (and restores any
+        // line buffer the user typed during streaming). Doubling up
+        // here would print an extra blank line.
+        ViewEvent::TurnDone => None,
+        ViewEvent::HistoryReplaced(messages) => {
+            // Clear scrollback + screen + cursor home, then replay each
+            // historical message in the same ANSI shapes the live stream
+            // uses.
+            let mut out = String::from("\x1b[3J\x1b[2J\x1b[H");
+            for m in messages {
+                let line = match m.role.as_str() {
+                    "user" => {
+                        // Match the live UserPrompt rendering: `> ` on
+                        // the first line only, two-space indent on
+                        // continuations so the whole block reads as a
+                        // single message.
+                        let marker = "\x1b[2m> \x1b[0m";
+                        let indent = "  ";
+                        let mut lines = m.content.split('\n');
+                        let mut body = String::new();
+                        if let Some(first) = lines.next() {
+                            body.push_str(&format!("{marker}{first}"));
+                        }
+                        for l in lines {
+                            body.push_str("\r\n");
+                            body.push_str(indent);
+                            body.push_str(l);
+                        }
+                        body.push_str("\r\n");
+                        body
+                    }
+                    "assistant" => {
+                        format!("{}\r\n", m.content.replace('\n', "\r\n"))
+                    }
+                    _ => format!(
+                        "\x1b[2m{}\x1b[0m\r\n",
+                        m.content.replace('\n', "\r\n")
+                    ),
+                };
+                out.push_str(&line);
+            }
+            Some(out)
+        }
+        ViewEvent::ErrorText(text) => {
+            Some(format!("\r\n\x1b[31m{text}\x1b[0m\r\n"))
+        }
+        ViewEvent::SessionListRefresh(_) => None,
+    }
+}
+
+fn terminal_data_envelope(ansi: &str) -> String {
+    let bytes = ansi.as_bytes();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    serde_json::json!({"type": "terminal_data", "data": b64}).to_string()
+}
 
 /// Convert a markdown string to a full standalone HTML document so the
 /// Files-tab iframe can render it without any client-side markdown
@@ -149,7 +342,7 @@ const MAX_RECENT_DIRS: usize = 3;
 /// strikethrough, autolinks); raw HTML in the source is stripped
 /// (`render.unsafe_ = false`) so `<script>` in a `.md` file we're
 /// previewing can't escape the iframe sandbox.
-fn render_markdown_to_html(md: &str) -> String {
+fn render_markdown_to_html(md: &str, theme: &str) -> String {
     let mut opts = comrak::ComrakOptions::default();
     opts.extension.table = true;
     opts.extension.strikethrough = true;
@@ -160,9 +353,19 @@ fn render_markdown_to_html(md: &str) -> String {
     opts.render.unsafe_ = false;
     let body = comrak::markdown_to_html(md, &opts);
 
-    // Minimal themed shell. Colors follow the dark preview theme the
-    // rest of the webview uses, with a light-mode fallback via the
-    // `prefers-color-scheme` media query.
+    // Preview is rendered inside a sandboxed iframe, so it lives in its
+    // own document with its own palette. The frontend passes the
+    // *resolved* theme ("light" | "dark") — "system" is resolved client-
+    // side to one of those so this function never has to inspect any
+    // runtime signal. We emit a single palette rather than a media
+    // query so that a user explicitly choosing Light while their OS is
+    // Dark (or vice versa) is honoured.
+    let (fg, bg, muted, accent, code_bg, border, color_scheme) = if theme == "light" {
+        ("#1a1a1a", "#ffffff", "#606366", "#2867c4", "#f3f4f6", "#d0d7de", "light")
+    } else {
+        ("#e6e6e6", "#1a1a1a", "#9aa0a6", "#6cb0ff", "#2a2a2a", "#333", "dark")
+    };
+
     format!(
         r##"<!DOCTYPE html>
 <html><head>
@@ -170,23 +373,13 @@ fn render_markdown_to_html(md: &str) -> String {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {{
-    color-scheme: light dark;
-    --fg: #e6e6e6;
-    --bg: #1a1a1a;
-    --muted: #9aa0a6;
-    --accent: #6cb0ff;
-    --code-bg: #2a2a2a;
-    --border: #333;
-  }}
-  @media (prefers-color-scheme: light) {{
-    :root {{
-      --fg: #1a1a1a;
-      --bg: #ffffff;
-      --muted: #606366;
-      --accent: #2867c4;
-      --code-bg: #f3f4f6;
-      --border: #d0d7de;
-    }}
+    color-scheme: {color_scheme};
+    --fg: {fg};
+    --bg: {bg};
+    --muted: {muted};
+    --accent: {accent};
+    --code-bg: {code_bg};
+    --border: {border};
   }}
   html, body {{ margin: 0; padding: 0; }}
   body {{
@@ -226,8 +419,7 @@ fn render_markdown_to_html(md: &str) -> String {
 }
 
 fn recent_dirs_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/thclaws/recent_dirs.json"))
+    crate::util::home_dir().map(|h| h.join(".config/thclaws/recent_dirs.json"))
 }
 
 fn load_recent_dirs() -> Vec<String> {
@@ -256,6 +448,47 @@ fn save_recent_dir(dir: &str) {
         path,
         serde_json::to_string_pretty(&dirs).unwrap_or_default(),
     );
+}
+
+// ── UI theme persistence ─────────────────────────────────────────────
+// Lives in its own tiny file under `~/.config/thclaws/` rather than
+// settings.json because theme is a per-user UI preference, not an
+// agent-runtime knob — keeping it separate avoids polluting any
+// project-committed settings.json.
+
+fn theme_path() -> Option<std::path::PathBuf> {
+    crate::util::home_dir().map(|h| h.join(".config/thclaws/theme.json"))
+}
+
+fn normalize_theme(raw: &str) -> &'static str {
+    match raw {
+        "light" => "light",
+        "dark" => "dark",
+        _ => "system",
+    }
+}
+
+fn load_theme() -> String {
+    let Some(path) = theme_path() else {
+        return "system".to_string();
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return "system".to_string();
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap_or_default();
+    let mode = parsed.get("mode").and_then(|v| v.as_str()).unwrap_or("system");
+    normalize_theme(mode).to_string()
+}
+
+fn save_theme(mode: &str) {
+    let Some(path) = theme_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let payload = serde_json::json!({ "mode": normalize_theme(mode) });
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&payload).unwrap_or_default());
 }
 
 /// Show a native OS confirmation dialog. Returns `true` on affirmative.
@@ -419,12 +652,6 @@ fn pick_directory_native(start_dir: &str) -> Option<String> {
     }
 }
 
-fn child_command() -> String {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "thclaws".to_string())
-}
-
 fn build_session_list(store: &Option<SessionStore>) -> String {
     let sessions: Vec<serde_json::Value> = store
         .as_ref()
@@ -506,10 +733,7 @@ fn auto_fallback_model(cfg: &AppConfig) -> Option<String> {
 /// `./AGENTS.md` in the current working directory.
 fn instructions_path(scope: &str) -> Option<std::path::PathBuf> {
     match scope {
-        "global" => {
-            let home = std::env::var("HOME").ok()?;
-            Some(std::path::PathBuf::from(home).join(".config/thclaws/AGENTS.md"))
-        }
+        "global" => crate::util::home_dir().map(|h| h.join(".config/thclaws/AGENTS.md")),
         _ => std::env::current_dir().ok().map(|d| d.join("AGENTS.md")),
     }
 }
@@ -563,248 +787,26 @@ pub fn run_gui() {
         .build(&event_loop)
         .expect("window build");
 
-    let bridge: Arc<Mutex<Option<PtyBridge>>> = Arc::new(Mutex::new(None));
-    let bridge_for_ipc = bridge.clone();
-    // Flag: true when the PTY was killed intentionally (directory change).
-    // Suppresses the PtyExit → ControlFlow::Exit path so the window stays.
-    let pty_restart = Arc::new(AtomicBool::new(false));
-    let pty_restart_for_ipc = pty_restart.clone();
     let proxy_for_ipc = proxy.clone();
-    let cmd = child_command();
-    let cmd_for_ipc = cmd.clone();
 
-    // Chat mode: background tokio runtime + agent. Prompts arrive via channel.
-    let (chat_tx, chat_rx) = std::sync::mpsc::channel::<ChatCommand>();
-    let proxy_for_chat = proxy.clone();
-    std::thread::spawn(move || {
-        // Catch panics so a bug in the agent / provider stream doesn't take
-        // the whole GUI window down with it. We surface the panic message in
-        // the chat pane so the user sees what happened.
-        let proxy_panic = proxy_for_chat.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-            rt.block_on(async move {
-                let config = AppConfig::load().unwrap_or_default();
-                let cwd = std::env::current_dir().unwrap_or_default();
-                let ctx = ProjectContext::discover(&cwd).unwrap_or(ProjectContext {
-                    cwd: cwd.clone(),
-                    git: None,
-                    project_instructions: None,
-                });
-                let system_fallback = if config.system_prompt.is_empty() {
-                    crate::prompts::defaults::SYSTEM
-                } else {
-                    config.system_prompt.as_str()
-                };
-                let base_prompt = crate::prompts::load("system", system_fallback);
-                let mut system = ctx.build_system_prompt(&base_prompt);
-                if let Some(store) = MemoryStore::default_path().map(MemoryStore::new) {
-                    if let Some(mem) = store.system_prompt_section() {
-                        system.push_str("\n\n# Memory\n");
-                        system.push_str(&mem);
-                    }
-                }
-                let kms_section = crate::kms::system_prompt_section(&config.kms_active);
-                if !kms_section.is_empty() {
-                    system.push_str("\n\n");
-                    system.push_str(&kms_section);
-                }
+    // Single shared session backing both Terminal + Chat tabs. The
+    // worker owns one Agent + Session + AppConfig and broadcasts every
+    // ViewEvent to subscribers; the event translator below fans those
+    // out as chat-shaped and terminal-shaped frontend dispatches.
+    let shared = Arc::new(crate::shared_session::spawn());
+    spawn_event_translator(&shared, proxy.clone());
+    let shared_for_ipc = shared.clone();
+    let shared_for_events = shared.clone();
 
-                let provider = match build_provider(&config) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = proxy_for_chat
-                            .send_event(UserEvent::ChatTextDelta(format!("Provider error: {e}")));
-                        let _ = proxy_for_chat.send_event(UserEvent::ChatDone);
-                        return;
-                    }
-                };
-
-                let mut tools = ToolRegistry::with_builtins();
-                if !config.kms_active.is_empty() {
-                    tools.register(std::sync::Arc::new(crate::tools::KmsReadTool));
-                    tools.register(std::sync::Arc::new(crate::tools::KmsSearchTool));
-                }
-                // Register skills + surface them in the system prompt so the Chat
-                // tab agent knows what's available (same as the Terminal REPL).
-                let skill_store = crate::skills::SkillStore::discover();
-                if !skill_store.skills.is_empty() {
-                    system.push_str("\n\n# Available skills (MANDATORY usage)\n");
-                    system.push_str(
-                        "The `Skill` tool loads expert instructions for a bundled workflow. \
-                     If a user request matches the trigger criteria of any skill below, \
-                     you MUST:\n\
-                     1. Call `Skill(name: \"<skill-name>\")` FIRST — before any Bash, \
-                        Write, Edit, or other tool calls for that task.\n\
-                     2. Follow the instructions returned by that skill for the rest of \
-                        the task. They override your default approach.\n\
-                     3. Announce the skill at the start of your reply, e.g. \
-                        \"Using the `pdf` skill to …\".\n\
-                     Do NOT implement the task yourself when a matching skill exists — \
-                     the skill encodes conventions and scripts you don't have built in.\n\n",
-                    );
-                    let mut entries: Vec<&crate::skills::SkillDef> =
-                        skill_store.skills.values().collect();
-                    entries.sort_by(|a, b| a.name.cmp(&b.name));
-                    for skill in entries {
-                        system.push_str(&format!("- **{}** — {}", skill.name, skill.description));
-                        if !skill.when_to_use.is_empty() {
-                            system.push_str(&format!("\n  Trigger: {}", skill.when_to_use));
-                        }
-                        system.push('\n');
-                    }
-                    tools.register(std::sync::Arc::new(crate::skills::SkillTool::new(
-                        skill_store,
-                    )));
-                }
-                let agent = Agent::new(provider, tools, &config.model, &system);
-
-                let session_store = crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new);
-                let mut current_session =
-                    crate::session::Session::new(&config.model, cwd.to_string_lossy());
-
-                while let Ok(cmd) = chat_rx.recv() {
-                    let prompt = match cmd {
-                        ChatCommand::Prompt(p) => p,
-                        ChatCommand::LoadHistory(msgs) => {
-                            agent.set_history(msgs);
-                            continue;
-                        }
-                        ChatCommand::NewSession => {
-                            let history = agent.history_snapshot();
-                            if !history.is_empty() {
-                                current_session.sync(history);
-                                if let Some(ref store) = session_store {
-                                    let _ = store.save(&mut current_session);
-                                }
-                            }
-                            agent.clear_history();
-                            current_session =
-                                crate::session::Session::new(&config.model, cwd.to_string_lossy());
-                            // Broadcast updated session list.
-                            let list = build_session_list(&session_store);
-                            let _ = proxy_for_chat.send_event(UserEvent::SessionListRefresh(list));
-                            continue;
-                        }
-                        ChatCommand::SaveAndQuit => {
-                            let history = agent.history_snapshot();
-                            if !history.is_empty() {
-                                current_session.sync(history);
-                                if let Some(ref store) = session_store {
-                                    let _ = store.save(&mut current_session);
-                                }
-                            }
-                            break;
-                        }
-                    };
-                    let mut stream = Box::pin(agent.run_turn(prompt));
-                    while let Some(ev) = stream.next().await {
-                        match ev {
-                            Ok(AgentEvent::Text(s)) => {
-                                let _ = proxy_for_chat.send_event(UserEvent::ChatTextDelta(s));
-                            }
-                            Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
-                                // Annotate the tool name with a short detail for a
-                                // few high-signal tools so the user can see which
-                                // skill / sub-agent / path is being used — not
-                                // just "Skill".
-                                let detail = match name.as_str() {
-                                    "Skill" => input
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .map(|n| format!("({n})")),
-                                    "Task" => input
-                                        .get("agent")
-                                        .and_then(|v| v.as_str())
-                                        .map(|a| format!("(agent={a})")),
-                                    "Bash" => {
-                                        input.get("command").and_then(|v| v.as_str()).map(|c| {
-                                            let first: String = c.chars().take(40).collect();
-                                            format!(
-                                                "({first}{})",
-                                                if c.chars().count() > 40 { "…" } else { "" }
-                                            )
-                                        })
-                                    }
-                                    "Read" | "Write" | "Edit" => input
-                                        .get("path")
-                                        .and_then(|v| v.as_str())
-                                        .map(|p| format!("({p})")),
-                                    "Grep" | "Glob" => input
-                                        .get("pattern")
-                                        .and_then(|v| v.as_str())
-                                        .map(|p| format!("({p})")),
-                                    "WebFetch" => {
-                                        input.get("url").and_then(|v| v.as_str()).map(|u| {
-                                            format!("({})", u.chars().take(60).collect::<String>())
-                                        })
-                                    }
-                                    "WebSearch" => input
-                                        .get("query")
-                                        .and_then(|v| v.as_str())
-                                        .map(|q| format!("({q})")),
-                                    _ => None,
-                                }
-                                .unwrap_or_default();
-                                let label = if detail.is_empty() {
-                                    name
-                                } else {
-                                    format!("{name} {detail}")
-                                };
-                                let _ = proxy_for_chat.send_event(UserEvent::ChatToolCall(label));
-                            }
-                            Ok(AgentEvent::ToolCallResult { name, output, .. }) => {
-                                let out = output.unwrap_or_else(|e| e);
-                                let _ =
-                                    proxy_for_chat.send_event(UserEvent::ChatToolResult(name, out));
-                            }
-                            Ok(AgentEvent::Done { .. }) => {
-                                // Auto-save session after each turn.
-                                let history = agent.history_snapshot();
-                                if !history.is_empty() {
-                                    current_session.sync(history);
-                                    if let Some(ref store) = session_store {
-                                        let _ = store.save(&mut current_session);
-                                    }
-                                    // Broadcast updated session list.
-                                    let list = build_session_list(&session_store);
-                                    let _ = proxy_for_chat
-                                        .send_event(UserEvent::SessionListRefresh(list));
-                                }
-                                let _ = proxy_for_chat.send_event(UserEvent::ChatDone);
-                            }
-                            Err(e) => {
-                                let _ = proxy_for_chat
-                                    .send_event(UserEvent::ChatTextDelta(format!("\nError: {e}")));
-                                let _ = proxy_for_chat.send_event(UserEvent::ChatDone);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            });
-        }));
-        if let Err(panic) = result {
-            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "agent thread panicked".to_string()
-            };
-            eprintln!("\x1b[31m[chat agent panicked: {msg}]\x1b[0m");
-            let _ = proxy_panic.send_event(UserEvent::ChatTextDelta(format!(
-                "\n\n⚠ chat agent crashed: {msg}\nrestart the app to recover."
-            )));
-            let _ = proxy_panic.send_event(UserEvent::ChatDone);
-        }
-    });
-    let chat_tx_for_ipc = chat_tx.clone();
-    let chat_tx_for_events = chat_tx;
-
+    // Enable devtools when the env opt-in is set — lets users diagnose
+    // a blank/black screen (Inspect → Console) without us shipping a
+    // different build. Set THCLAWS_DEVTOOLS=1 and relaunch.
+    let devtools_on = std::env::var("THCLAWS_DEVTOOLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let webview = WebViewBuilder::new()
         .with_html(FRONTEND_HTML)
+        .with_devtools(devtools_on)
         .with_ipc_handler(move |req| {
             let body = req.body();
             let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -907,76 +909,89 @@ pub fn run_gui() {
                         }
                     }
                 }
-                "pty_spawn" => {
-                    let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                    let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-                    if let Ok(pty) = PtyBridge::spawn(&cmd_for_ipc, &["--cli"], cols, rows) {
-                        let _ = pty.start_reader(proxy_for_ipc.clone());
-                        *bridge_for_ipc.lock().unwrap() = Some(pty);
+                "shell_input" | "chat_prompt" | "pty_write" => {
+                    // Unified entry point: a line of user input from
+                    // either tab. `chat_prompt` and `pty_write` are
+                    // legacy aliases kept so the frontend can roll over
+                    // without a flag-day. `pty_write` historically sent
+                    // a base64 chunk per keystroke — for backward compat
+                    // with any in-flight callers we accept both
+                    // `text` (new) and `data` (base64 of the line).
+                    let line = if let Some(t) = msg.get("text").and_then(|v| v.as_str()) {
+                        t.to_string()
+                    } else if let Some(b64) = msg.get("data").and_then(|v| v.as_str()) {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .ok()
+                            .and_then(|b| String::from_utf8(b).ok())
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if !trimmed.is_empty() {
+                        let _ = shared_for_ipc
+                            .input_tx
+                            .send(ShellInput::Line(trimmed.to_string()));
                     }
-                    // Send initial sidebar state after PTY is up.
+                }
+                "pty_spawn" => {
+                    // Legacy ack: the frontend sends this on Terminal-tab
+                    // mount to trigger initial sidebar state. The shared
+                    // session is already running by this point.
                     let _ = proxy_for_ipc.send_event(UserEvent::SendInitialState);
                 }
-                "pty_write" => {
-                    if let Some(data_b64) = msg.get("data").and_then(|v| v.as_str()) {
-                        if let Ok(bytes) =
-                            base64::engine::general_purpose::STANDARD.decode(data_b64)
-                        {
-                            if let Some(ref mut pty) = *bridge_for_ipc.lock().unwrap() {
-                                pty.write(&bytes);
-                            }
-                        }
-                    }
+                "shell_cancel" => {
+                    // Ctrl+C on an empty line in the Terminal tab (or an
+                    // explicit cancel action from Chat) — request the
+                    // current turn stop at its next streaming event.
+                    shared_for_ipc.request_cancel();
                 }
-                "pty_kill" => {
-                    // Kill the current PTY child so the user can change
-                    // directory via the startup modal and spawn a fresh one.
-                    pty_restart_for_ipc.store(true, Ordering::SeqCst);
-                    if let Some(ref mut pty) = bridge_for_ipc.lock().unwrap().take() {
-                        pty.kill();
-                    }
+                "team_enabled_get" => {
+                    let enabled = crate::config::ProjectConfig::load()
+                        .and_then(|c| c.team_enabled)
+                        .unwrap_or(false);
+                    let payload = serde_json::json!({
+                        "type": "team_enabled",
+                        "enabled": enabled,
+                    });
+                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
+                        payload.to_string(),
+                    ));
                 }
-                "pty_resize" => {
-                    let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                    let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-                    if let Some(ref pty) = *bridge_for_ipc.lock().unwrap() {
-                        pty.resize(cols, rows);
-                    }
+                "team_enabled_set" => {
+                    // Flip the project-scoped teamEnabled flag. Team tools
+                    // are registered at SharedSession spawn, so this takes
+                    // effect after a restart; the frontend shows a hint.
+                    let enabled = msg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+                    cfg.team_enabled = Some(enabled);
+                    let (ok, error) = match cfg.save() {
+                        Ok(()) => (true, String::new()),
+                        Err(e) => (false, e.to_string()),
+                    };
+                    let payload = serde_json::json!({
+                        "type": "team_enabled_result",
+                        "enabled": enabled,
+                        "ok": ok,
+                        "error": error,
+                    });
+                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
+                        payload.to_string(),
+                    ));
                 }
-                "restart" => {
-                    if let Some(ref mut pty) = bridge_for_ipc.lock().unwrap().take() {
-                        pty.kill();
-                    }
-                    let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                    let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-                    if let Ok(pty) = PtyBridge::spawn(&cmd_for_ipc, &["--cli"], cols, rows) {
-                        let _ = pty.start_reader(proxy_for_ipc.clone());
-                        *bridge_for_ipc.lock().unwrap() = Some(pty);
-                    }
-                }
-                "chat_prompt" => {
-                    if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
-                        let _ = chat_tx_for_ipc.send(ChatCommand::Prompt(text.to_string()));
-                    }
+                "pty_kill" | "pty_resize" | "restart" => {
+                    // PTY-era hooks. The shared in-process session has
+                    // no PTY to kill or resize; ignore quietly so the
+                    // frontend can keep emitting them during transition.
                 }
                 "new_session" => {
-                    let _ = chat_tx_for_ipc.send(ChatCommand::NewSession);
-                    // NewSession in agent thread saves + clears + broadcasts
-                    // session list. Also send ack to clear chat UI.
+                    let _ = shared_for_ipc.input_tx.send(ShellInput::NewSession);
                     let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        serde_json::json!({"type": "new_session_ack"}).to_string()
+                        serde_json::json!({"type": "new_session_ack"}).to_string(),
                     ));
-                    // Also clear the Terminal tab's REPL: send `/clear\n` to
-                    // the PTY child so its in-process agent drops its history,
-                    // then tell the frontend to wipe the xterm scrollback so
-                    // prior output disappears visually too.
-                    if let Ok(mut guard) = bridge_for_ipc.lock() {
-                        if let Some(bridge) = guard.as_mut() {
-                            bridge.write(b"/clear\n");
-                        }
-                    }
                     let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        serde_json::json!({"type": "terminal_clear"}).to_string()
+                        serde_json::json!({"type": "terminal_clear"}).to_string(),
                     ));
                 }
                 "config_poll" => {
@@ -1102,7 +1117,11 @@ pub fn run_gui() {
                                 Err(e) => (false, e.to_string(), Some(path.display().to_string())),
                             }
                         }
-                        None => (false, "path not resolvable (HOME not set?)".into(), None),
+                        None => (
+                            false,
+                            "path not resolvable (home directory unavailable)".into(),
+                            None,
+                        ),
                     };
                     let payload = serde_json::json!({
                         "type": "instructions_save_result",
@@ -1200,16 +1219,24 @@ pub fn run_gui() {
                     ));
                 }
                 "clipboard_read" => {
+                    // Return both `text` (for short payloads / back-compat)
+                    // and `text_b64` — the frontend prefers the base64 path
+                    // so the JS-bridge escape function doesn't have to
+                    // survive U+2028 / U+2029 line separators or the size
+                    // quirks of `evaluate_script`'s single-quoted string.
                     let (ok, text) = match arboard::Clipboard::new()
                         .and_then(|mut c| c.get_text())
                     {
                         Ok(t) => (true, t),
                         Err(_) => (false, String::new()),
                     };
+                    let text_b64 = base64::engine::general_purpose::STANDARD
+                        .encode(text.as_bytes());
                     let payload = serde_json::json!({
                         "type": "clipboard_text",
                         "ok": ok,
                         "text": text,
+                        "text_b64": text_b64,
                     });
                     let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
                         payload.to_string()
@@ -1219,6 +1246,27 @@ pub fn run_gui() {
                     let text = msg.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     let _ = arboard::Clipboard::new()
                         .and_then(|mut c| c.set_text(text.to_string()));
+                }
+                "theme_get" => {
+                    let payload = serde_json::json!({
+                        "type": "theme",
+                        "mode": load_theme(),
+                    });
+                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
+                        payload.to_string()
+                    ));
+                }
+                "theme_set" => {
+                    let requested = msg.get("mode").and_then(|v| v.as_str()).unwrap_or("system");
+                    let normalized = normalize_theme(requested).to_string();
+                    save_theme(&normalized);
+                    let payload = serde_json::json!({
+                        "type": "theme",
+                        "mode": normalized,
+                    });
+                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
+                        payload.to_string()
+                    ));
                 }
                 "secrets_backend_get" => {
                     let backend = crate::secrets::get_backend()
@@ -1464,13 +1512,16 @@ pub fn run_gui() {
                             })
                         })
                         .collect();
-                    // Team feature is opt-in; if the project hasn't set
-                    // teamEnabled: true, report has_team = false so the
-                    // frontend hides the Team tab entirely.
-                    let team_feature_on = crate::config::ProjectConfig::load()
-                        .and_then(|c| c.team_enabled)
-                        .unwrap_or(false);
-                    let has_team = team_feature_on && team_dir.join("config.json").exists();
+                    // The Team tab auto-shows whenever a team config
+                    // exists on disk — the agent's TeamCreate tool just
+                    // writes that config, so the tab needs to follow
+                    // suit without any settings.json edit. The
+                    // `teamEnabled` flag still gates whether the team
+                    // *tools* are registered (so the agent can or can't
+                    // spawn teams), but once a team exists, hiding the
+                    // UI for it is hostile — the user can dismiss the
+                    // tab by deleting `.thclaws/team/`.
+                    let has_team = team_dir.join("config.json").exists();
                     let payload = serde_json::json!({
                         "type": "team_status",
                         "has_team": has_team,
@@ -1517,6 +1568,13 @@ pub fn run_gui() {
                     // frontend can hand it to a CodeMirror / TipTap editor.
                     let mode = msg.get("mode").and_then(|v| v.as_str()).unwrap_or("preview");
                     let source_mode = mode == "source";
+                    // Resolved theme ("light" | "dark") for the iframe
+                    // shell. The frontend maps "system" to the concrete
+                    // value before sending so we don't need OS detection
+                    // here. Default = dark for backwards compat when the
+                    // caller omits the field.
+                    let theme = msg.get("theme").and_then(|v| v.as_str()).unwrap_or("dark");
+                    let theme = if theme == "light" { "light" } else { "dark" };
                     match crate::sandbox::Sandbox::check(raw_path) {
                         Ok(path) => {
                             let ext = path.extension()
@@ -1560,7 +1618,7 @@ pub fn run_gui() {
                                 match std::fs::read_to_string(&path) {
                                     Ok(text) => {
                                         let content = if is_markdown && !source_mode {
-                                            render_markdown_to_html(&text)
+                                            render_markdown_to_html(&text, theme)
                                         } else {
                                             text
                                         };
@@ -1664,37 +1722,15 @@ pub fn run_gui() {
                 }
                 "session_load" => {
                     if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
-                        if let Some(store) = SessionStore::default_path().map(SessionStore::new) {
-                            if let Ok(session) = store.load(id) {
-                                // Send history to chat agent thread.
-                                let _ = chat_tx_for_ipc.send(ChatCommand::LoadHistory(session.messages.clone()));
-                                // Also send /load command to the terminal PTY.
-                                if let Some(ref mut pty) = *bridge_for_ipc.lock().unwrap() {
-                                    let cmd = format!("/load {}\n", id);
-                                    pty.write(cmd.as_bytes());
-                                }
-                                // Build display messages for the frontend.
-                                let display: Vec<serde_json::Value> = session.messages.iter().map(|m| {
-                                    let role = match m.role {
-                                        crate::types::Role::User => "user",
-                                        crate::types::Role::Assistant => "assistant",
-                                        crate::types::Role::System => "system",
-                                    };
-                                    let text: String = m.content.iter().filter_map(|b| match b {
-                                        crate::types::ContentBlock::Text { text } => Some(text.clone()),
-                                        crate::types::ContentBlock::ToolUse { name, .. } => Some(format!("[tool: {name}]")),
-                                        crate::types::ContentBlock::ToolResult { content, .. } => Some(format!("[result: {}]", &content[..content.len().min(100)])),
-                                    }).collect::<Vec<_>>().join("\n");
-                                    serde_json::json!({"role": role, "content": text})
-                                }).collect();
-                                let payload = serde_json::json!({
-                                    "type": "session_loaded",
-                                    "id": session.id,
-                                    "messages": display,
-                                });
-                                let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(payload.to_string()));
-                            }
-                        }
+                        // Single source of truth: ask the shared session
+                        // to load. It rebuilds agent history + emits a
+                        // HistoryReplaced ViewEvent which the translator
+                        // fans out to both Terminal (clear scrollback +
+                        // ANSI replay) and Chat (clear bubbles + render
+                        // each message as its role-coloured bubble).
+                        let _ = shared_for_ipc
+                            .input_tx
+                            .send(ShellInput::LoadSession(id.to_string()));
                     }
                 }
                 _ => {}
@@ -1707,68 +1743,20 @@ pub fn run_gui() {
         *control_flow = ControlFlow::Wait;
 
         match event {
-            Event::UserEvent(UserEvent::PtyData(b64)) => {
-                let escaped = b64.replace('\\', "\\\\").replace('\'', "\\'");
-                let js = format!(
-                    "window.__thclaws_dispatch(JSON.stringify({{type:'pty_data',data:'{escaped}'}}))"
-                );
-                let _ = webview.evaluate_script(&js);
-            }
-            Event::UserEvent(UserEvent::ChatTextDelta(text)) => {
-                let escaped = escape_for_js(&text);
-                let _ = webview.evaluate_script(&format!(
-                    "window.__thclaws_dispatch(JSON.stringify({{type:'chat_text_delta',text:'{escaped}'}}))"
-                ));
-            }
-            Event::UserEvent(UserEvent::ChatToolCall(name)) => {
-                let escaped = escape_for_js(&name);
-                let _ = webview.evaluate_script(&format!(
-                    "window.__thclaws_dispatch(JSON.stringify({{type:'chat_tool_call',name:'{escaped}'}}))"
-                ));
-            }
-            Event::UserEvent(UserEvent::ChatToolResult(name, output)) => {
-                let n = escape_for_js(&name);
-                let o = escape_for_js(&output);
-                let _ = webview.evaluate_script(&format!(
-                    "window.__thclaws_dispatch(JSON.stringify({{type:'chat_tool_result',name:'{n}',output:'{o}'}}))"
-                ));
-            }
-            Event::UserEvent(UserEvent::ChatDone) => {
-                let _ = webview.evaluate_script(
-                    "window.__thclaws_dispatch(JSON.stringify({type:'chat_done'}))",
-                );
-            }
-            Event::UserEvent(UserEvent::SessionListRefresh(json)) => {
+            Event::UserEvent(UserEvent::Dispatch(json)) => {
                 let escaped = escape_for_js(&json);
                 let _ = webview.evaluate_script(&format!(
                     "window.__thclaws_dispatch('{escaped}')"
                 ));
             }
-            Event::UserEvent(UserEvent::FileTree(json)) | Event::UserEvent(UserEvent::FileContent(json)) => {
+            Event::UserEvent(UserEvent::SessionListRefresh(json))
+            | Event::UserEvent(UserEvent::FileTree(json))
+            | Event::UserEvent(UserEvent::FileContent(json))
+            | Event::UserEvent(UserEvent::SessionLoaded(json)) => {
                 let escaped = escape_for_js(&json);
                 let _ = webview.evaluate_script(&format!(
                     "window.__thclaws_dispatch('{escaped}')"
                 ));
-            }
-            Event::UserEvent(UserEvent::SessionLoaded(json)) => {
-                let escaped = escape_for_js(&json);
-                let _ = webview.evaluate_script(&format!(
-                    "window.__thclaws_dispatch('{escaped}')"
-                ));
-            }
-            Event::UserEvent(UserEvent::PtyExit) => {
-                if pty_restart.swap(false, Ordering::SeqCst) {
-                    // Intentional kill (directory change via status bar).
-                    // Don't close the window — the frontend will re-show the
-                    // startup modal and spawn a fresh PTY after set_cwd.
-                } else {
-                    // /quit or /exit — save chat session then close.
-                    let _ = chat_tx_for_events.send(ChatCommand::SaveAndQuit);
-                    if let Some(ref mut pty) = bridge.lock().unwrap().take() {
-                        pty.kill();
-                    }
-                    *control_flow = ControlFlow::Exit;
-                }
             }
             Event::UserEvent(UserEvent::SendInitialState) => {
                 let mut config = AppConfig::load().unwrap_or_default();
@@ -1825,11 +1813,8 @@ pub fn run_gui() {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                // Window close — save chat session too.
-                let _ = chat_tx_for_events.send(ChatCommand::SaveAndQuit);
-                if let Some(ref mut pty) = bridge.lock().unwrap().take() {
-                    pty.kill();
-                }
+                // Save the shared session before exit.
+                let _ = shared_for_events.input_tx.send(ShellInput::SaveAndQuit);
                 // Kill any spawned teammate processes.
                 let _ = std::process::Command::new("pkill")
                     .args(["-f", "team-agent"])

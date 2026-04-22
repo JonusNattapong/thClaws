@@ -45,9 +45,7 @@ struct BackendFile {
 }
 
 fn backend_path() -> Option<std::path::PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".config/thclaws/secrets.json"))
+    crate::util::home_dir().map(|h| h.join(".config/thclaws/secrets.json"))
 }
 
 /// Read the user's stored backend preference. `None` means the user
@@ -63,7 +61,8 @@ pub fn get_backend() -> Option<Backend> {
 /// first `set` / `get` so keychain prompts are skipped for dotenv
 /// users.
 pub fn set_backend(backend: Backend) -> Result<()> {
-    let path = backend_path().ok_or_else(|| Error::Config("HOME is not set".into()))?;
+    let path = backend_path()
+        .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

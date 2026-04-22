@@ -87,7 +87,7 @@ export function InstructionsEditorModal({
   return (
     <div
       className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: "rgba(0,0,0,0.75)" }}
+      style={{ background: "var(--modal-backdrop)" }}
       onClick={onClose}
     >
       <div

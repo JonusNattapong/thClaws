@@ -140,9 +140,7 @@ impl KmsRef {
 }
 
 fn user_root() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".config/thclaws/kms"))
+    crate::util::home_dir().map(|h| h.join(".config/thclaws/kms"))
 }
 
 fn project_root() -> PathBuf {
@@ -250,7 +248,7 @@ pub fn create(name: &str, scope: KmsScope) -> Result<KmsRef> {
         )));
     }
     let root = scope_root(scope)
-        .ok_or_else(|| Error::Config("HOME is not set".into()))?
+        .ok_or_else(|| Error::Config("cannot locate user home directory".into()))?
         .join(name);
     if root.is_dir() {
         return Ok(KmsRef {

@@ -130,18 +130,18 @@ impl AgentDefsConfig {
     }
 
     fn default_json_path() -> PathBuf {
-        std::env::var("HOME")
-            .map(|h| PathBuf::from(h).join(".config/thclaws/agents.json"))
-            .unwrap_or_else(|_| PathBuf::from("agents.json"))
+        crate::util::home_dir()
+            .map(|h| h.join(".config/thclaws/agents.json"))
+            .unwrap_or_else(|| PathBuf::from("agents.json"))
     }
 
     /// Directories to scan for agent .md files, in priority order.
     /// Later entries override earlier ones (same name).
     fn agent_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
-        if let Ok(home) = std::env::var("HOME") {
-            dirs.push(PathBuf::from(&home).join(".claude/agents")); // user Claude Code
-            dirs.push(PathBuf::from(&home).join(".config/thclaws/agents")); // user thClaws
+        if let Some(home) = crate::util::home_dir() {
+            dirs.push(home.join(".claude/agents")); // user Claude Code
+            dirs.push(home.join(".config/thclaws/agents")); // user thClaws
         }
         dirs.push(PathBuf::from(".claude/agents")); // project Claude Code
         dirs.push(PathBuf::from(".thclaws/agents")); // project thClaws (highest priority)

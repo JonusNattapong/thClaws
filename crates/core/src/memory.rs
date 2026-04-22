@@ -51,7 +51,7 @@ impl MemoryStore {
             }
         }
 
-        let home = std::env::var("HOME").ok()?;
+        let home = crate::util::home_dir()?;
 
         // Legacy user-level per-project paths (read-only fallback).
         if let Ok(cwd) = std::env::current_dir() {
@@ -60,14 +60,14 @@ impl MemoryStore {
                 .replace('/', "-")
                 .trim_start_matches('-')
                 .to_string();
-            let claude_project = PathBuf::from(&home)
+            let claude_project = home
                 .join(".claude/projects")
                 .join(&sanitized)
                 .join("memory");
             if claude_project.exists() {
                 return Some(claude_project);
             }
-            let thclaws_project = PathBuf::from(&home)
+            let thclaws_project = home
                 .join(".thclaws/projects")
                 .join(&sanitized)
                 .join("memory");
@@ -77,7 +77,7 @@ impl MemoryStore {
         }
 
         // Global fallback.
-        let thclaws = PathBuf::from(&home).join(".local/share/thclaws/memory");
+        let thclaws = home.join(".local/share/thclaws/memory");
         if thclaws.exists() {
             return Some(thclaws);
         }

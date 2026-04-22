@@ -66,9 +66,9 @@ impl SkillStore {
     /// Skill directories in load order (later overrides earlier by name).
     fn skill_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
-        if let Ok(home) = std::env::var("HOME") {
-            dirs.push(PathBuf::from(&home).join(".claude/skills")); // user Claude Code
-            dirs.push(PathBuf::from(&home).join(".config/thclaws/skills")); // user thClaws
+        if let Some(home) = crate::util::home_dir() {
+            dirs.push(home.join(".claude/skills")); // user Claude Code
+            dirs.push(home.join(".config/thclaws/skills")); // user thClaws
         }
         dirs.push(PathBuf::from(".claude/skills")); // project Claude Code
         dirs.push(PathBuf::from(".thclaws/skills")); // project thClaws (highest priority)
@@ -290,8 +290,9 @@ fn target_root(project_scope: bool) -> Result<PathBuf> {
             .map_err(|e| Error::Tool(format!("cwd: {e}")))?
             .join(".thclaws/skills"))
     } else {
-        let home = std::env::var("HOME").map_err(|_| Error::Tool("HOME is not set".into()))?;
-        Ok(PathBuf::from(home).join(".config/thclaws/skills"))
+        let home = crate::util::home_dir()
+            .ok_or_else(|| Error::Tool("cannot locate user home directory".into()))?;
+        Ok(home.join(".config/thclaws/skills"))
     }
 }
 
@@ -415,8 +416,9 @@ pub fn install_from_git(
             .map_err(|e| Error::Tool(format!("cwd: {e}")))?
             .join(".thclaws/skills")
     } else {
-        let home = std::env::var("HOME").map_err(|_| Error::Tool("HOME is not set".into()))?;
-        PathBuf::from(home).join(".config/thclaws/skills")
+        crate::util::home_dir()
+            .ok_or_else(|| Error::Tool("cannot locate user home directory".into()))?
+            .join(".config/thclaws/skills")
     };
     std::fs::create_dir_all(&target_root)
         .map_err(|e| Error::Tool(format!("mkdir {}: {e}", target_root.display())))?;
@@ -620,6 +622,17 @@ impl SkillTool {
         Self {
             store: std::sync::Arc::new(std::sync::Mutex::new(store)),
         }
+    }
+
+    /// Build from an externally-owned shared handle. Lets the GUI's
+    /// shared session hand in the same Arc<Mutex<SkillStore>> it
+    /// keeps in WorkerState, so `/skill install` can repopulate the
+    /// store without needing to find and mutate the tool through the
+    /// registry.
+    pub fn new_from_handle(
+        store: std::sync::Arc<std::sync::Mutex<SkillStore>>,
+    ) -> Self {
+        Self { store }
     }
 
     /// Clone of the internal store handle. Lets the REPL re-populate the

@@ -78,9 +78,9 @@ impl CommandStore {
     /// `.thclaws/commands/deploy.md` overrides a global `~/.claude/commands/deploy.md`.
     fn command_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
-        if let Ok(home) = std::env::var("HOME") {
-            dirs.push(PathBuf::from(&home).join(".config/thclaws/commands"));
-            dirs.push(PathBuf::from(&home).join(".claude/commands"));
+        if let Some(home) = crate::util::home_dir() {
+            dirs.push(home.join(".config/thclaws/commands"));
+            dirs.push(home.join(".claude/commands"));
         }
         dirs.insert(0, PathBuf::from(".claude/commands"));
         dirs.insert(0, PathBuf::from(".thclaws/commands"));

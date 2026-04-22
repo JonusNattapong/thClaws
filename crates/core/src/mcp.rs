@@ -71,8 +71,7 @@ fn mcp_allowlist_path() -> Option<std::path::PathBuf> {
     let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         std::path::PathBuf::from(xdg)
     } else {
-        let home = std::env::var("HOME").ok()?;
-        std::path::PathBuf::from(home).join(".config")
+        crate::util::home_dir()?.join(".config")
     };
     Some(base.join("thclaws").join("mcp_allowlist.json"))
 }

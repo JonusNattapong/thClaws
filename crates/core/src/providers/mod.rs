@@ -10,7 +10,6 @@ use futures::stream::BoxStream;
 
 pub mod agent_sdk;
 pub mod anthropic;
-pub mod anthropic_agent;
 pub mod assemble;
 pub mod gemini;
 pub mod ollama;
@@ -24,7 +23,6 @@ pub mod openai_responses;
 pub enum ProviderKind {
     AgenticPress,
     Anthropic,
-    AnthropicAgent,
     AgentSdk,
     OpenAI,
     OpenAIResponses,
@@ -39,7 +37,6 @@ impl ProviderKind {
     pub const ALL: &'static [Self] = &[
         Self::AgenticPress,
         Self::Anthropic,
-        Self::AnthropicAgent,
         Self::AgentSdk,
         Self::OpenAI,
         Self::OpenAIResponses,
@@ -54,7 +51,6 @@ impl ProviderKind {
         match self {
             Self::AgenticPress => "agentic-press",
             Self::Anthropic => "anthropic",
-            Self::AnthropicAgent => "anthropic-managed-agent",
             Self::AgentSdk => "anthropic-agent",
             Self::OpenAI => "openai",
             Self::OpenAIResponses => "openai-responses",
@@ -70,7 +66,6 @@ impl ProviderKind {
         match self {
             Self::AgenticPress => "ap/gemma4-12b",
             Self::Anthropic => "claude-sonnet-4-6",
-            Self::AnthropicAgent => "managed/claude-sonnet-4-6",
             Self::AgentSdk => "agent/claude-sonnet-4-6",
             Self::OpenAI => "gpt-4o",
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
@@ -123,7 +118,6 @@ impl ProviderKind {
         match self {
             Self::AgenticPress => Some("AGENTIC_PRESS_LLM_API_KEY"),
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
-            Self::AnthropicAgent => Some("ANTHROPIC_API_KEY"),
             Self::AgentSdk => None, // Uses Claude Code's own auth
             Self::OpenAI => Some("OPENAI_API_KEY"),
             Self::OpenAIResponses => Some("OPENAI_API_KEY"),
@@ -157,8 +151,6 @@ impl ProviderKind {
             Some(Self::OpenRouter)
         } else if model.starts_with("ap/") {
             Some(Self::AgenticPress)
-        } else if model.starts_with("managed/") {
-            Some(Self::AnthropicAgent)
         } else if model.starts_with("agent/") {
             Some(Self::AgentSdk)
         } else if model.starts_with("claude-") {

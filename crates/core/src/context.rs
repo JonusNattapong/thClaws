@@ -124,8 +124,7 @@ pub fn find_claude_md(start: &Path) -> Option<String> {
     // 1. User-level instructions. Claude Code path first, then vendor-neutral
     // locations so a repo-shared AGENTS.md can extend (not replace) the user
     // baseline.
-    if let Ok(home) = std::env::var("HOME") {
-        let home = PathBuf::from(&home);
+    if let Some(home) = crate::util::home_dir() {
         for candidate in [
             home.join(".claude/CLAUDE.md"),
             home.join(".claude/AGENTS.md"),

@@ -832,9 +832,11 @@ impl Tool for TeamCreateTool {
         "TeamCreate"
     }
     fn description(&self) -> &'static str {
-        "Create an agent team for parallel work. Define agent names and roles. \
-         After creating, use SpawnTeammate to start each agent. Use \
-         TeamTaskCreate to add tasks to the queue that teammates can claim."
+        "Create an agent team for parallel work (thClaws native — writes \
+         `.thclaws/team/config.json` in the current project root; NOT the SDK's \
+         server-side teams feature). Define agent names and roles. After \
+         creating, use SpawnTeammate to start each agent as a thClaws subprocess, \
+         and TeamTaskCreate to add tasks to a shared queue teammates can claim."
     }
     fn input_schema(&self) -> Value {
         json!({

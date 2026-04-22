@@ -16,9 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn path() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".config/thclaws/endpoints.json"))
+    crate::util::home_dir().map(|h| h.join(".config/thclaws/endpoints.json"))
 }
 
 fn read_map() -> BTreeMap<String, String> {
@@ -33,7 +31,7 @@ fn read_map() -> BTreeMap<String, String> {
 
 fn write_map(map: &BTreeMap<String, String>) -> Result<()> {
     let Some(p) = path() else {
-        return Err(Error::Config("HOME is not set".into()));
+        return Err(Error::Config("cannot locate user home directory".into()));
     };
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::Config(format!("create dir: {e}")))?;

@@ -36,12 +36,20 @@ export function useEditingShortcuts() {
       if (key === "v" && !e.shiftKey) {
         e.preventDefault();
         // Request clipboard text from the native side; subscribe for
-        // exactly one response, then unsubscribe.
+        // exactly one response, then unsubscribe. Prefer the base64
+        // payload — it sidesteps the JS-bridge escape quirks that
+        // drop or corrupt long text (U+2028/U+2029, size limits).
         const unsub = subscribe((msg) => {
           if (msg.type === "clipboard_text") {
             unsub();
-            if (msg.ok && typeof msg.text === "string") {
-              insertAtCursor(field, msg.text);
+            if (msg.ok) {
+              const text =
+                typeof msg.text_b64 === "string"
+                  ? decodeBase64Utf8(msg.text_b64)
+                  : typeof msg.text === "string"
+                    ? msg.text
+                    : "";
+              if (text) insertAtCursor(field, text);
             }
           }
         });
@@ -87,6 +95,16 @@ export function useEditingShortcuts() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+}
+
+// Decode a UTF-8 base64 string in a way that handles non-ASCII
+// correctly. `atob` gives us Latin-1 bytes; we reinterpret them
+// through TextDecoder so é / Thai / emoji survive round-trip.
+function decodeBase64Utf8(b64: string): string {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder("utf-8").decode(bytes);
 }
 
 function insertAtCursor(

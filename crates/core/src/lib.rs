@@ -15,6 +15,10 @@ pub mod endpoints;
 pub mod error;
 #[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "gui")]
+pub mod shared_session;
+#[cfg(feature = "gui")]
+pub mod shell_dispatch;
 pub mod hooks;
 pub mod kms;
 pub mod mcp;
@@ -35,6 +39,7 @@ pub mod tokens;
 pub mod tools;
 pub mod types;
 pub mod usage;
+pub mod util;
 pub mod version;
 
 pub use error::{Error, Result};

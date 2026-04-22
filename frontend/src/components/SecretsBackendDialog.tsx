@@ -12,14 +12,25 @@ export function SecretsBackendDialog({
   onCancel?: () => void;
 }) {
   const [busy, setBusy] = useState<Backend | null>(null);
+  const [error, setError] = useState<string>("");
 
   const choose = (backend: Backend) => {
     setBusy(backend);
+    setError("");
     const unsub = subscribe((msg) => {
       if (msg.type === "secrets_backend_result" && msg.backend === backend) {
         unsub();
         setBusy(null);
-        if (msg.ok) onPicked(backend);
+        if (msg.ok) {
+          onPicked(backend);
+        } else {
+          // Show the backend's error message instead of silently
+          // re-enabling the button and leaving the user stuck.
+          setError(
+            (msg.error as string | undefined) ??
+              "failed to save the choice",
+          );
+        }
       }
     });
     send({ type: "secrets_backend_set", backend });
@@ -28,7 +39,7 @@ export function SecretsBackendDialog({
   return (
     <div
       className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: "rgba(0,0,0,0.75)" }}
+      style={{ background: "var(--modal-backdrop)" }}
       onClick={onCancel}
     >
       <div
@@ -58,6 +69,19 @@ export function SecretsBackendDialog({
           Pick once. You can change this later by editing{" "}
           <span className="font-mono">~/.config/thclaws/secrets.json</span>.
         </p>
+
+        {error && (
+          <div
+            className="mb-3 px-3 py-2 rounded text-[11px]"
+            style={{
+              background: "rgba(220,80,80,0.12)",
+              color: "#e06060",
+              border: "1px solid rgba(220,80,80,0.4)",
+            }}
+          >
+            {error}
+          </div>
+        )}
 
         <div className="flex flex-col gap-3">
           <button
