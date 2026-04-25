@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-25
+
+Re-release of v0.3.0 — the v0.3.0 tag's release workflow failed
+(missing `banner.txt` broke the frontend build). Tag re-cut against
+the fix.
+
+### Fixed (v0.3.1 vs v0.3.0)
+
+- **`banner.txt` now ships in the repo** so `vite build` resolves
+  `import bannerText from "../../../banner.txt?raw"` in
+  `TerminalView.tsx`. v0.3.0 release job failed at this step on every
+  platform.
+- **`cargo fmt` drift** in `crates/core` cleaned up so the CI fmt
+  check passes.
+- **`actions/checkout`, `actions/setup-node`, `actions/upload-artifact`,
+  `actions/download-artifact` bumped to v5** for Node 24 support
+  (v4 is now deprecated on GitHub-hosted runners).
+
+### Providers (since v0.2.2)
+
+- Reasoning-model support end-to-end: DeepSeek v4-flash/pro, DeepSeek r1,
+  OpenAI o-series via OpenRouter. `reasoning_content` is captured into a
+  Thinking content block and echoed back on subsequent turns (these
+  providers 400 without it). Conservative allowlist — non-thinking models
+  pay zero extra tokens.
+- Provider-aware alias resolution: agent-def `model: sonnet` stays in
+  the project's current provider namespace instead of surprise-switching
+  to native Anthropic.
+- Model catalogue v3 (provider-keyed maps, real ids, per-row provenance).
+  `/models` reads from catalogue; `/model` auto-scans Ollama context
+  window.
+
+### Agent Teams (since v0.2.2)
+
+- Sandbox boundary anchors to `$THCLAWS_PROJECT_ROOT` (not cwd); worktree
+  teammates can write shared artifacts at workspace root; `Write` into
+  deep new trees walks up to the longest existing ancestor.
+- "Project settings win" on cwd change: GUI reloads `ProjectConfig` and
+  rebuilds the agent; worktree teammates pick up the workspace's
+  `settings.json` (was silently falling back to user config).
+- Role guards on `Bash` / `Write` / `Edit`:
+  - Lead can't run `rm -rf`, `git reset --hard`, `git worktree remove`,
+    `git push --force`, `git checkout -- …`, or `Write` / `Edit` source
+    files. One narrow exception: when a merge is in progress and the
+    target file has `<<<<<<<` markers, lead may write the resolved
+    content (so package.json-style conflicts can be handled without
+    delegating).
+  - Teammates can't `git reset --hard <other-branch>`. Same-branch
+    recovery (`HEAD~N`, sha, tags) stays allowed.
+- `EDITOR` / `GIT_EDITOR` / `VISUAL` / `GIT_SEQUENCE_EDITOR` stubbed to
+  `true` for teammates so `vi` / `git commit -e` don't hang waiting for
+  input via `/dev/tty`.
+- "Plan Approval" convention documented in default `lead.md` /
+  `agent_team.md` prompts (lead↔teammate handshake, NOT a user gate).
+- `TeamTaskCreate` gains an `owner` field; `claim_next` is role-aware.
+
+### GUI (since v0.2.2)
+
+- Terminal tab: Up/Down arrow prompt history.
+- Files tab: WYSIWYG round-trip for `.md` preview + editor; HTML preview
+  base-URL fix; off-screen edit-button positioning fix.
+- Approval modal; MCP spawn through approval sink; `ReadyGate` for
+  deferred startup so the worker accepts prompts before MCP-spawn
+  approval returns.
+- Context warning banner + per-file size breakdown of the system prompt.
+- Settings menu polish: accent-tinted hover + focus highlight; modal
+  backdrop dismiss on mousedown-origin (fewer accidental closes).
+- Windows GUI fixes backported from upstream: `rfd` file picker,
+  `native_dialog` confirm, `ospath()` path-separator helper.
+
+### KMS
+
+- `/kms ingest` slash command; sidebar refreshes live on KMS changes.
+
+### Catalogue tooling
+
+- New `make catalogue` target wraps `catalogue-seed` with a diff-stat
+  preview and a per-provider transparency report (new IDs added +
+  unchanged + skipped-no-context counts).
+
+### User manual — NEW in this release
+
+- 17-chapter reference manual in English (`user-manual/`) and Thai
+  (`user-manual-th/`) with shared images at `user-manual-img/`. Covers
+  installation through agent teams. Case-study chapters (18–24) for
+  building/deploying real projects remain in workspace draft and will
+  graduate to the published manual as each is reviewed.
+
 ## [0.2.2] — 2026-04-22
 
 ### Added
