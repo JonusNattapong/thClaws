@@ -16,6 +16,12 @@ on:
 permissions:
   contents: write
 
+# Opt into Node 24 ahead of GitHub's 2026-06-02 forced switch, so we
+# catch action-runtime breakage on our schedule, not theirs. Drop this
+# once Node 24 is the runner default.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     name: ${{ matrix.target }}
