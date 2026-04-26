@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-27
+
+Same-day patch release fixing a critical Windows-only bug surfaced
+within hours of v0.4.0 shipping.
+
+### Fixed
+
+- **Bash tool unusable on Windows** ([#29](https://github.com/thClaws/thClaws/issues/29),
+  Chawasit Tengtrairatana). `/bin/sh` was hardcoded at 4 sites
+  (`tools/bash.rs`, `team.rs`, `repl.rs`, `hooks.rs`) — Windows
+  doesn't have that path, so spawn returned `os error 3` (path
+  not found) and the agent was effectively crippled on Win11.
+  Centralized shell resolution into `util::shell_command_{sync,
+  async}()`, branching on `cfg!(windows)`. On Windows this is
+  `cmd.exe /C <cmd>`; on Unix `/bin/sh -c <cmd>`, unchanged.
+
+### Added
+
+- **`THCLAWS_SHELL` env override.** Power users with `bash` from
+  WSL / Git Bash, or who prefer `pwsh`, can set
+  `THCLAWS_SHELL="bash -c"` (or `"pwsh -Command"`, etc.). The
+  helper splits on whitespace into `(executable, flag)`. Useful on
+  Windows where `cmd.exe` doesn't parse bash-syntax commands the
+  same as `bash` does.
+
+### Caveats
+
+Bash-syntax commands the agent emits (`find . -name '*.rs'`,
+single-quoted args, complex pipelines) may not parse identically
+under `cmd.exe`. Set `THCLAWS_SHELL="bash -c"` if you have Git Bash
+or WSL `bash` on `PATH` for closer-to-Unix semantics on Windows.
+
 ## [0.4.0] — 2026-04-27
 
 Minor release. Provider expansion + agent-loop UX polish + a class

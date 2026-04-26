@@ -3250,10 +3250,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 continue;
             }
             println!("{COLOR_DIM}$ {shell_cmd}{COLOR_RESET}");
-            let status = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(shell_cmd)
-                .status();
+            let status = crate::util::shell_command_sync(shell_cmd).status();
             // If the child left the cursor mid-line (e.g. `cat` on a file with
             // no trailing newline), readline's next-prompt render issues a CR
             // + clear-to-EOL and wipes whatever the child just wrote. Emit a
