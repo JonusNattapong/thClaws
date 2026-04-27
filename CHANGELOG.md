@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-27
+
+Minor release. Lands the **Enterprise Edition foundation** (Phases 0–3
+of `dev-plan/01-enterprise-edition.md`) — policy infrastructure,
+branded builds, plugin/skill/MCP allow-list, and gateway enforcement.
+
+**Open-core users see zero behavior change.** Every feature below is
+inert unless an Ed25519-signed organization policy file is present at
+`~/.config/thclaws/policy.json` or `/etc/thclaws/policy.json` *and*
+verifies against either an embedded public key (enterprise builds) or
+one supplied at runtime via env var / conventional file path.
+
+### Added — Enterprise Edition foundation
+
+- **Org policy file format** (Phase 0). New `policy/` module with a
+  versioned JSON schema covering four sub-policies (branding, plugins,
+  gateway, sso), Ed25519 signature verification using a hand-written
+  canonical-JSON serializer (no external `canonical-json` dep), expiry
+  checks, and optional `binding.binary_fingerprint` matching to prevent
+  lifting a customer's policy onto a non-customer build. Loader searches
+  `THCLAWS_POLICY_FILE` → `/etc/thclaws/policy.json` → `~/.config/thclaws/policy.json`.
+  Public key sources: compile-time embedded → `THCLAWS_POLICY_PUBLIC_KEY`
+  env var → `/etc/thclaws/policy.pub` → `~/.config/thclaws/policy.pub`.
+  Open-core release binaries embed no key; enterprise builds bake the
+  customer's public key at compile time via `THCLAWS_POLICY_PUBKEY_PATH`.
+  Refuses to start on signature failure, expiry, binding mismatch, or
+  missing verification key — fail-closed by design.
+
+- **`thclaws-policy-tool` operator CLI** (Phase 0). Subcommands:
+  `keygen` (generates Ed25519 keypair, chmods private key 0600 on Unix),
+  `sign` (signs a policy JSON file), `verify` (checks signature
+  against a public key), `inspect` (pretty-prints policy structure),
+  `fingerprint` (computes SHA-256 of a binary for `binding`). Signing
+  logic lives **only** in this tool — main runtime has zero signing
+  code, so a leaked source tree isn't a key-compromise vector.
+
+- **Branding config** (Phase 1). New `branding` module reads
+  `policies.branding` from the active policy with fallback to today's
+  defaults. Wired into the REPL banner, version header, `/doctor`
+  diagnostics title, GUI window title, and the system prompt
+  (`{product}` placeholder substituted at load time so the model
+  introduces itself as the org's product name). `{support_email}`
+  template substitution available for any prompt that needs it.
+
+- **Plugin/skill/MCP source allow-list** (Phase 2). New
+  `policy/allowlist.rs` matcher with host+path glob patterns,
+  segment wildcards, host-prefix wildcards (`*.acme.example`), and
+  mid-segment globs (`skill-*`). Strips scheme / query / fragment /
+  port / `.git` suffix before matching. Wired at:
+  - `plugins::install` — rejects URLs not in `allowed_hosts`
+  - `skills::install_from_url` — same gate, covers both git and zip
+    dispatch paths
+  - `skills::enforce_scripts_policy` — rejects skills with non-empty
+    `scripts/` dirs when `allow_external_scripts: false`. Bundle path
+    rejects scripted skills individually so declarative siblings still
+    install.
+  - `config::parse_mcp_json` — filters HTTP MCP servers whose URL host
+    isn't in `allowed_hosts` when `allow_external_mcp: false`. Logs
+    yellow `[mcp] '<name>' skipped: <reason>` to stderr. Stdio MCPs
+    pass through (admin's mcp.json content = admin's responsibility).
+
+- **Gateway enforcement** (Phase 3). When `policies.gateway.enabled:
+  true`, every cloud-provider call routes through the org's private
+  LLM gateway (LiteLLM, Portkey, Helicone, internal proxy). User's
+  per-provider API keys are ignored — gateway owns credentials.
+  Architecture: `build_provider` returns a single OpenAI-compatible
+  client pointing at the gateway URL when active, regardless of which
+  `ProviderKind` the user picked. Works because every common gateway
+  product speaks OpenAI Chat Completions and routes to upstream
+  providers via the `model` field.
+  - Auth header template supports `{{env:NAME}}` for env-var-injected
+    secrets (keeps gateway tokens out of the auditable signed policy
+    file). `{{sso_token}}` placeholder reserved for Phase 4.
+  - `read_only_local_models_allowed: true` escape valve lets local
+    providers (Ollama, OllamaAnthropic, LMStudio, AgentSdk) bypass
+    the gateway and run directly. Off by default (strict enterprise).
+  - Validation gate at policy load: refuses to start if
+    `gateway.enabled: true` with empty `url` (would otherwise
+    fail-open at provider construction). Same check for
+    `sso.enabled: true` with empty `issuer_url` / `client_id`.
+
+- **`ENTERPRISE.md`** admin guide added to the public repo. Covers
+  the open-core + signed-policy architecture, 10-minute quick-start
+  walkthrough, operational concerns (key rotation, expiry, binary
+  fingerprint binding, MDM deployment), troubleshooting all four
+  startup-refusal modes, and an FAQ.
+
+### Caveats
+
+- **OIDC SSO is not yet implemented.** Phase 4 lands in v0.6.0. Until
+  then, the gateway uses static-token / env-var auth via the
+  `{{env:NAME}}` template substitution. Works fine for LiteLLM-style
+  deployments where the gateway token is the only required credential.
+- **Frontend branding strings** (5 hardcoded "thClaws" literals in
+  `App.tsx`/`ChatView.tsx`, plus the embedded React-bundled logo
+  imports) are NOT yet routed through the branding module. They land
+  in a v0.5.x point release once the IPC `branding_get` bridge is
+  wired. The Rust-side branding (REPL banner, GUI title, system
+  prompt) is fully active in v0.5.0.
+- **HTTP-layer fail-closed** for the gateway is currently advisory.
+  The provider-replacement approach already eliminates bypass paths
+  inside the agent loop. A wrapper `reqwest::Client` for
+  defense-in-depth is a planned hardening pass.
+
 ## [0.4.2] — 2026-04-26
 
 Small additive release in response to issue [#30](https://github.com/thClaws/thClaws/issues/30)

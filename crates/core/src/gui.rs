@@ -843,7 +843,7 @@ pub fn run_gui() {
         })
         .unwrap_or((1200.0, 800.0));
     let window = WindowBuilder::new()
-        .with_title("thClaws")
+        .with_title(&crate::branding::current().name)
         .with_inner_size(LogicalSize::new(win_w, win_h))
         .build(&event_loop)
         .expect("window build");

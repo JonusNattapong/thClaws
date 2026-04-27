@@ -11,6 +11,7 @@ use futures::stream::BoxStream;
 pub mod agent_sdk;
 pub mod anthropic;
 pub mod assemble;
+pub mod gateway;
 pub mod gemini;
 pub mod ollama;
 pub mod ollama_cloud;

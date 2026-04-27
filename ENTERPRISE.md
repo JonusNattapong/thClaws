@@ -1,11 +1,9 @@
 # thClaws Enterprise Edition — Administrator Guide
 
-> **Status:** Phase 0 (policy infrastructure) is implemented but not yet
-> shipped in a tagged release. The deployment workflow described below
-> is functional in `main` and can be evaluated against a debug build.
-> Phases 1–4 (branding enforcement, plugin allow-list, gateway routing,
-> SSO) are implemented progressively in v0.5.x and v0.6.x — see the
-> "Status by phase" section.
+> **Status:** Phases 0–3 (policy infrastructure, branding, plugin/skill/MCP
+> allow-list, gateway enforcement) **shipped in v0.5.0**. SSO (Phase 4)
+> lands in v0.6.0; the gateway works with static-token / env-var auth
+> until then. See the "Status by phase" section for details.
 
 This document is for IT/Security administrators evaluating or deploying
 thClaws inside an organization. Read this if you need to:
@@ -245,15 +243,22 @@ become enforceable as their respective phase ships:
 
 | Policy block | Phase | Status | Released in |
 |---|---|---|---|
-| `branding` (logo, name, support contact, banner) | 1 | In progress | v0.5.0 (planned) |
-| `plugins` (allow-list, no-external-scripts, no-external-mcp) | 2 | In progress | v0.5.0 (planned) |
-| `gateway` (HTTP routing, fail-closed, identity injection) | 3 | Planned | v0.6.0 |
-| `sso` (OIDC discovery, PKCE, token storage) | 4 | Planned | v0.7.0 |
+| `branding` (logo, name, support contact, banner) | 1 | ✅ Shipped (Rust-side) | v0.5.0 |
+| `plugins` (allow-list, no-external-scripts, no-external-mcp) | 2 | ✅ Shipped | v0.5.0 |
+| `gateway` (HTTP routing, fail-closed, identity injection) | 3 | ✅ Shipped (static-token / env-var auth) | v0.5.0 |
+| `sso` (OIDC discovery, PKCE, token storage) | 4 | Planned | v0.6.0 |
 
 A policy file with all four blocks present is valid against any v0.5.x+
 build; blocks for unimplemented phases are accepted but inert. Once
 the corresponding phase ships, the same policy file gains enforcement
 without re-signing.
+
+**v0.5.0 caveats**: Frontend (React) branding strings still render
+"thClaws" literals — backend branding (REPL banner, GUI title, system
+prompt template) is fully active. Wiring the frontend through an IPC
+bridge to the branding module is planned for v0.5.x. Until then,
+end-user-visible "thClaws" strings inside the GUI window are unbranded;
+the window title and CLI surfaces are correctly branded.
 
 ---
 

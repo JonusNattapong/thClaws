@@ -712,6 +712,27 @@ pub fn render_help() -> &'static str {
 pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
     let kind = config.detect_provider_kind()?;
 
+    // Org policy gateway (EE Phase 3): when policies.gateway.enabled and
+    // this provider should route through the gateway, replace the entire
+    // provider with an OpenAI-compatible client pointing at the gateway
+    // URL. The gateway (LiteLLM, Portkey, etc.) handles upstream routing
+    // based on the model id and applies its own auth. User's per-provider
+    // API keys are deliberately ignored — gateway owns credentials.
+    if crate::providers::gateway::should_route(kind) {
+        if let Some(url) = crate::providers::gateway::gateway_url() {
+            let chat_url = if url.ends_with("/chat/completions") {
+                url
+            } else {
+                format!("{}/chat/completions", url.trim_end_matches('/'))
+            };
+            // The gateway's auth header replaces normal Bearer-with-key.
+            // Empty string is fine — OpenAIProvider always sends some
+            // Authorization, and gateways without auth ignore it.
+            let auth = crate::providers::gateway::resolve_auth_header().unwrap_or_default();
+            return Ok(Arc::new(OpenAIProvider::new(auth).with_base_url(chat_url)));
+        }
+    }
+
     // Auth-less providers build directly.
     match kind {
         ProviderKind::AgentSdk => {
@@ -1485,14 +1506,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     };
     let v = crate::version::info();
     let dirty_tag = if v.git_dirty { "+dirty" } else { "" };
+    let brand = crate::branding::current();
     if team_agent_name.is_none() {
-        const BANNER: &str = include_str!("../../../banner.txt");
-        println!("\n{COLOR_CYAN}{BANNER}{COLOR_RESET}");
+        println!("\n{COLOR_CYAN}{}{COLOR_RESET}", brand.banner_text);
         println!();
     }
     println!(
-        "{COLOR_BOLD}thClaws {}{COLOR_RESET} {COLOR_DIM}({}{}) — model: {} · permissions: {} · session: {}{COLOR_RESET}",
-        v.version, v.git_sha, dirty_tag, config.model, perm_label, session.id
+        "{COLOR_BOLD}{} {}{COLOR_RESET} {COLOR_DIM}({}{}) — model: {} · permissions: {} · session: {}{COLOR_RESET}",
+        brand.name, v.version, v.git_sha, dirty_tag, config.model, perm_label, session.id
     );
     if let Some(ref name) = team_agent_name {
         println!(
@@ -2719,7 +2740,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 plugin.path.display()
                             );
                             println!(
-                                "{COLOR_YELLOW}restart thClaws to activate the plugin's skills / commands / MCP servers{COLOR_RESET}"
+                                "{COLOR_YELLOW}restart {} to activate the plugin's skills / commands / MCP servers{COLOR_RESET}",
+                                crate::branding::current().name
                             );
                         }
                         Err(e) => {
@@ -3014,7 +3036,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     );
                 }
                 SlashCommand::Doctor => {
-                    println!("{COLOR_DIM}── thClaws diagnostics ──{COLOR_RESET}");
+                    println!(
+                        "{COLOR_DIM}── {} diagnostics ──{COLOR_RESET}",
+                        crate::branding::current().name
+                    );
                     let v = crate::version::info();
                     println!("{COLOR_DIM}version:    {}{COLOR_RESET}", v.version);
                     println!(
