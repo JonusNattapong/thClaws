@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, X } from "lucide-react";
-import { subscribe } from "../hooks/useIPC";
+import { send, subscribe } from "../hooks/useIPC";
 
 /// Todo-list sidebar. Subscribes to `chat_todo_update` IPC envelopes
 /// from the worker and renders the model's `TodoWrite` checklist as a
@@ -138,10 +138,22 @@ export function TodoSidebar() {
         </div>
         <button
           type="button"
-          onClick={() => setDismissed(true)}
+          onClick={() => {
+            // When every todo is `completed` and the user closes the
+            // sidebar, drop the on-disk file too. The "all done"
+            // checklist would otherwise hydrate back on next session
+            // start as a stale list of all-checked items.
+            const allDone =
+              todos.length > 0 && todos.every((t) => t.status === "completed");
+            if (allDone) {
+              send({ type: "clear_todos" });
+              setTodos([]);
+            }
+            setDismissed(true);
+          }}
           className="p-0.5 rounded hover:bg-white/10"
           style={{ color: "var(--text-secondary)" }}
-          title="Hide sidebar (todos stay in .thclaws/todos.md)"
+          title="Hide sidebar (all-done lists are cleared from .thclaws/todos.md; in-progress lists are kept)"
         >
           <X size={14} />
         </button>

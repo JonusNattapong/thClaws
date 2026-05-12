@@ -561,6 +561,32 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Delete `.thclaws/todos.md` from disk and broadcast an empty
+        // TodoUpdate so the sidebar (and any future renders) reflect
+        // the cleared state. Triggered by TodoSidebar when the user
+        // closes a fully-completed list — the prior session's "all
+        // done" checkboxes shouldn't bleed into the next session as
+        // a stale checked list.
+        "clear_todos" => {
+            let path = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".thclaws")
+                .join("todos.md");
+            let removed = std::fs::remove_file(&path).is_ok();
+            // Broadcast through the proper channel so every subscriber
+            // (chat tab, terminal-translator, etc.) gets the update.
+            let _ = ctx
+                .shared
+                .events_tx
+                .send(crate::shared_session::ViewEvent::TodoUpdate(Vec::new()));
+            let payload = serde_json::json!({
+                "type": "todos_cleared",
+                "removed": removed,
+                "path": path.to_string_lossy(),
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Working directory (M6.36 SERVE9d — migrated from gui.rs) ─
         "get_cwd" => {
             let cwd = std::env::current_dir()

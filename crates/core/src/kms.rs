@@ -2374,6 +2374,401 @@ fn split_frontmatter_block(s: &str) -> (&str, &str) {
     ("", s)
 }
 
+/// LLM-driven sibling of [`auto_link`]. For each page in the KMS,
+/// send the body plus a digest of every *other* page (slug + title +
+/// description) to the active model and ask which natural mentions
+/// should become `[[<slug>]]` wikilinks. Then validate the model's
+/// suggestions in Rust (anchor must appear in the body, target slug
+/// must exist, no overlap with existing links / code / headings,
+/// no self-references, first-occurrence-only) before writing.
+///
+/// Pages-only — `sources/` is deliberately excluded; sources are
+/// raw artifacts, not navigable nodes.
+///
+/// Per-page call timeout: 900s (a single long-context call can
+/// legitimately pause mid-stream while the model thinks). Cancellation
+/// honored between pages and inside the chunked stream.
+pub async fn auto_link_llm(
+    kref: &KmsRef,
+    opts: AutoLinkOptions,
+    provider: &dyn crate::providers::Provider,
+    model: &str,
+    cancel: &crate::cancel::CancelToken,
+) -> Result<AutoLinkReport> {
+    use std::collections::HashSet;
+
+    let pages_dir = kref.pages_dir();
+    if !pages_dir.is_dir() {
+        return Ok(AutoLinkReport::default());
+    }
+
+    struct PageEntry {
+        stem: String,
+        title: String,
+        description: String,
+        body: String,
+        frontmatter_block: String,
+        path: std::path::PathBuf,
+    }
+
+    // ── 1. Page index ─────────────────────────────────────────────
+    let mut entries: Vec<PageEntry> = Vec::new();
+    for entry in std::fs::read_dir(&pages_dir)
+        .map_err(|e| Error::Tool(format!("readdir {}: {e}", pages_dir.display())))?
+    {
+        let entry = entry.map_err(|e| Error::Tool(format!("readdir entry: {e}")))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if RESERVED_PAGE_STEMS
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(&stem))
+        {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
+        let (fm_block, body) = split_frontmatter_block(&raw);
+        let (fm, _) = parse_frontmatter(&raw);
+        let title = fm
+            .get("title")
+            .map(|t| t.trim().trim_matches('"').trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| stem.clone());
+        let description = fm
+            .get("description")
+            .map(|d| d.trim().trim_matches('"').trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| first_meaningful_line(body));
+        entries.push(PageEntry {
+            stem,
+            title,
+            description,
+            body: body.to_string(),
+            frontmatter_block: fm_block.to_string(),
+            path,
+        });
+    }
+
+    let valid_slugs: HashSet<String> = entries.iter().map(|e| e.stem.clone()).collect();
+    let mut report = AutoLinkReport::default();
+
+    // ── 2. Per-page LLM call ──────────────────────────────────────
+    for page in &entries {
+        if cancel.is_cancelled() {
+            return Err(Error::Tool("/kms link --llm cancelled".into()));
+        }
+        report.pages_scanned += 1;
+
+        let others: Vec<(String, String, String)> = entries
+            .iter()
+            .filter(|e| e.stem != page.stem)
+            .map(|e| (e.stem.clone(), e.title.clone(), e.description.clone()))
+            .collect();
+        if others.is_empty() {
+            continue;
+        }
+
+        let prompt = build_llm_link_prompt(&page.stem, &page.body, &others);
+        let raw = match llm_link_oneshot(
+            provider,
+            model,
+            prompt,
+            std::time::Duration::from_secs(900),
+            cancel,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "\x1b[33m[/kms link --llm] page {}: LLM call failed: {e}; skipping\x1b[0m",
+                    page.stem
+                );
+                continue;
+            }
+        };
+        let parsed = match parse_llm_link_response(&raw) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "\x1b[33m[/kms link --llm] page {}: response unparseable: {e}; skipping\x1b[0m",
+                    page.stem
+                );
+                continue;
+            }
+        };
+
+        let (new_body, hits) = apply_llm_links(&page.body, &parsed, &page.stem, &valid_slugs);
+        if hits.is_empty() {
+            continue;
+        }
+        report.pages_modified += 1;
+        report.links_added += hits.len() as u32;
+        for hit in hits {
+            report.hits.push(hit);
+        }
+        if opts.apply {
+            let mut full = String::with_capacity(page.frontmatter_block.len() + new_body.len());
+            full.push_str(&page.frontmatter_block);
+            full.push_str(&new_body);
+            std::fs::write(&page.path, full.as_bytes())
+                .map_err(|e| Error::Tool(format!("write {}: {e}", page.path.display())))?;
+        }
+    }
+
+    if opts.apply && report.pages_modified > 0 {
+        append_log_header(kref, "link-llm", "auto-link-llm")?;
+    }
+    Ok(report)
+}
+
+/// Build the prompt sent to the model for one page. We include the
+/// full body so the model has surrounding context, and the digest of
+/// every other page (slug + title + 1-line description) as the
+/// candidate target set. The response schema is fixed JSON so Rust
+/// can validate every suggestion before writing.
+fn build_llm_link_prompt(
+    source_stem: &str,
+    source_body: &str,
+    others: &[(String, String, String)],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        "You are linking pages in a thClaws KMS (knowledge management system).\n\n\
+        Given the SOURCE page below and a digest of OTHER pages in the same KMS, \
+        return a JSON object listing the `[[wikilink]]` insertions you would make.\n\n\
+        Rules:\n\
+        - Each link has an `anchor` (an exact substring of the source body) and \
+          a `target_slug` (one of the slugs in the digest).\n\
+        - Only insert a link when the anchor naturally refers to the target page's topic.\n\
+        - Do not link inside existing wikilinks `[[..]]`, markdown links `[text](url)`, \
+          inline code `` `..` ``, fenced code blocks, headings, or YAML frontmatter.\n\
+        - Each target slug appears AT MOST ONCE per source page (first natural mention).\n\
+        - Skip generic / weak relationships — only link when the connection is specific \
+          and would genuinely help a reader follow the thought.\n\
+        - Do NOT invent slugs that aren't in the digest. Do NOT modify the body in any \
+          way other than the wikilink insertions described.\n\
+        - Return ONLY a JSON object — no prose, no markdown code fences.\n\n",
+    );
+    prompt.push_str(&format!("SOURCE PAGE SLUG: {source_stem}\n\n"));
+    prompt.push_str("SOURCE BODY:\n---\n");
+    prompt.push_str(source_body);
+    prompt.push_str("\n---\n\nOTHER PAGES (slug — title — description):\n");
+    for (slug, title, desc) in others {
+        let desc_trimmed: String = desc.chars().take(160).collect();
+        prompt.push_str(&format!("- {slug} — {title} — {desc_trimmed}\n"));
+    }
+    prompt.push_str(
+        "\nRespond with this exact schema:\n\
+        {\"links\": [{\"anchor\": \"<exact body substring>\", \"target_slug\": \"<digest slug>\"}, ...]}\n\
+        \nIf nothing should link, return: {\"links\": []}\n",
+    );
+    prompt
+}
+
+/// Parse the LLM's JSON response. Tolerant of code-fence wrappers
+/// (` ```json\n{...}\n``` `) and leading/trailing prose. Returns
+/// `(anchor, target_slug)` pairs.
+fn parse_llm_link_response(raw: &str) -> Result<Vec<(String, String)>> {
+    let trimmed = raw.trim();
+    // Strip ``` / ```json fences if the model wrapped its output.
+    let inner = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.trim_end_matches("```").trim())
+        .unwrap_or(trimmed);
+    let start = inner
+        .find('{')
+        .ok_or_else(|| Error::Tool("LLM response contained no JSON object".into()))?;
+    let end = inner
+        .rfind('}')
+        .ok_or_else(|| Error::Tool("LLM response had no closing brace".into()))?;
+    if end < start {
+        return Err(Error::Tool("LLM response braces in wrong order".into()));
+    }
+    let json = &inner[start..=end];
+
+    #[derive(serde::Deserialize)]
+    struct Item {
+        anchor: String,
+        target_slug: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        links: Vec<Item>,
+    }
+    let resp: Resp =
+        serde_json::from_str(json).map_err(|e| Error::Tool(format!("LLM JSON parse: {e}")))?;
+    Ok(resp
+        .links
+        .into_iter()
+        .map(|i| (i.anchor, i.target_slug))
+        .collect())
+}
+
+/// Validate + apply each `(anchor, target_slug)` candidate to the
+/// page body. Same protection logic as the deterministic
+/// [`auto_link`]: fenced code, headings, inline code, existing
+/// wikilinks / markdown links are all off-limits. First occurrence
+/// only per target. Self-references and unknown slugs are dropped.
+fn apply_llm_links(
+    body: &str,
+    candidates: &[(String, String)],
+    source_stem: &str,
+    valid_slugs: &std::collections::HashSet<String>,
+) -> (String, Vec<LinkHit>) {
+    use regex::Regex;
+    let protect_re = Regex::new(r"(?:\[\[[^\]\n]+\]\]|\[[^\]\n]+\]\([^)\n]+\)|`[^`\n]+`)")
+        .expect("static regex");
+
+    let mut working = body.to_string();
+    let mut hits: Vec<LinkHit> = Vec::new();
+    let mut linked: std::collections::HashSet<String> = std::collections::HashSet::new();
+    linked.insert(source_stem.to_string()); // never self-link
+
+    for (anchor, target) in candidates {
+        if !valid_slugs.contains(target) {
+            continue;
+        }
+        if linked.contains(target) {
+            continue;
+        }
+        if anchor.trim().is_empty() {
+            continue;
+        }
+        let Some(pos) = find_unprotected_occurrence(&working, anchor, &protect_re) else {
+            continue;
+        };
+        let end = pos + anchor.len();
+        // Use `[[slug]]` when the anchor matches the slug exactly
+        // (case-sensitive), otherwise `[[slug|anchor]]` to preserve
+        // the visible text the page already used.
+        let replacement = if anchor == target {
+            format!("[[{target}]]")
+        } else {
+            format!("[[{target}|{anchor}]]")
+        };
+        working.replace_range(pos..end, &replacement);
+        linked.insert(target.clone());
+        hits.push(LinkHit {
+            page_stem: source_stem.to_string(),
+            target_slug: target.clone(),
+            matched: anchor.clone(),
+        });
+    }
+    (working, hits)
+}
+
+/// Find the first byte offset of `anchor` in `body` that lives
+/// outside a fenced code block, a heading line, and any protected
+/// inline region (existing wikilink / markdown link / inline code).
+/// Returns `None` if `anchor` doesn't appear anywhere safe.
+fn find_unprotected_occurrence(
+    body: &str,
+    anchor: &str,
+    protect_re: &regex::Regex,
+) -> Option<usize> {
+    let mut offset = 0;
+    let mut in_fence = false;
+    for line in body.split_inclusive('\n') {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+            in_fence = !in_fence;
+            offset += line.len();
+            continue;
+        }
+        if in_fence || trimmed_start.starts_with('#') {
+            offset += line.len();
+            continue;
+        }
+        let protected_ranges: Vec<(usize, usize)> = protect_re
+            .find_iter(line)
+            .map(|m| (m.start(), m.end()))
+            .collect();
+        if let Some(local_pos) = line.find(anchor) {
+            let local_end = local_pos + anchor.len();
+            let inside_protected = protected_ranges
+                .iter()
+                .any(|(s, e)| *s <= local_pos && local_end <= *e);
+            if !inside_protected {
+                return Some(offset + local_pos);
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// Streaming one-shot helper for the LLM auto-linker. Mirrors the
+/// research-pipeline `oneshot` (same cancel + chunk-timeout
+/// semantics) but lives here so kms.rs doesn't pull in the research
+/// module just for one call shape.
+async fn llm_link_oneshot(
+    provider: &dyn crate::providers::Provider,
+    model: &str,
+    prompt: String,
+    timeout: std::time::Duration,
+    cancel: &crate::cancel::CancelToken,
+) -> Result<String> {
+    use crate::providers::{ProviderEvent, StreamRequest};
+    use crate::types::Message;
+    use futures::StreamExt;
+
+    let req = StreamRequest {
+        model: model.to_string(),
+        system: None,
+        messages: vec![Message::user(prompt)],
+        tools: Vec::new(),
+        max_tokens: 4096,
+        thinking_budget: None,
+        stream_chunk_timeout_override: Some(timeout),
+    };
+    let stream_fut = provider.stream(req);
+    let mut stream = match tokio::time::timeout(timeout, stream_fut).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(Error::Tool(
+                "auto-link LLM call timed out building stream".into(),
+            ))
+        }
+    };
+    let mut text = String::new();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(Error::Tool("auto-link LLM call cancelled".into()));
+        }
+        let next = tokio::select! {
+            ev = tokio::time::timeout(timeout, stream.next()) => ev,
+            _ = cancel.cancelled() => {
+                return Err(Error::Tool("auto-link LLM call cancelled".into()));
+            }
+        };
+        match next {
+            Ok(Some(Ok(ProviderEvent::TextDelta(s)))) => text.push_str(&s),
+            Ok(Some(Ok(ProviderEvent::MessageStop { .. }))) => break,
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(e))) => return Err(e),
+            Ok(None) => break,
+            Err(_) => {
+                return Err(Error::Tool(
+                    "auto-link LLM call timed out reading stream".into(),
+                ))
+            }
+        }
+    }
+    Ok(text)
+}
+
 fn remove_index_bullet(kref: &KmsRef, stem: &str) -> Result<()> {
     let path = kref.index_path();
     let Ok(existing) = std::fs::read_to_string(&path) else {
@@ -4418,6 +4813,127 @@ Inline `PostgreSQL` in code span.\n\
         assert_eq!(report.links_added, 1);
         let on_disk = std::fs::read_to_string(k.pages_dir().join("note.md")).unwrap();
         assert!(on_disk.contains("[[pg]]"));
+    }
+
+    #[test]
+    fn parse_llm_link_response_accepts_bare_json() {
+        let raw = r#"{"links":[{"anchor":"PostgreSQL","target_slug":"postgresql"}]}"#;
+        let out = parse_llm_link_response(raw).unwrap();
+        assert_eq!(
+            out,
+            vec![("PostgreSQL".to_string(), "postgresql".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_llm_link_response_strips_code_fences() {
+        let raw =
+            "```json\n{\"links\":[{\"anchor\":\"db indexing\",\"target_slug\":\"indexing\"}]}\n```";
+        let out = parse_llm_link_response(raw).unwrap();
+        assert_eq!(
+            out,
+            vec![("db indexing".to_string(), "indexing".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_llm_link_response_tolerates_leading_prose() {
+        // Some models prepend "Here is the JSON:" or similar despite
+        // the prompt instructing them not to. We grab from first `{`
+        // to last `}` so this still works.
+        let raw = "Here you go:\n{\"links\":[]}\n— done.";
+        let out = parse_llm_link_response(raw).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_llm_link_response_errors_on_no_json() {
+        let err = parse_llm_link_response("nothing here").unwrap_err();
+        assert!(format!("{err}").contains("no JSON"));
+    }
+
+    #[test]
+    fn apply_llm_links_validates_and_inserts_first_occurrence() {
+        let mut valid = std::collections::HashSet::new();
+        valid.insert("postgres".to_string());
+        valid.insert("indexing".to_string());
+        let body = "We use PostgreSQL daily. PostgreSQL is great. We also love PostgreSQL.\n";
+        let candidates = vec![
+            ("PostgreSQL".to_string(), "postgres".to_string()),
+            ("PostgreSQL".to_string(), "postgres".to_string()), // duplicate target — must be ignored
+        ];
+        let (out, hits) = apply_llm_links(body, &candidates, "self", &valid);
+        // First-occurrence policy: only ONE link inserted.
+        assert_eq!(hits.len(), 1);
+        assert_eq!(out.matches("[[postgres|PostgreSQL]]").count(), 1);
+        // The other two mentions of PostgreSQL remain unlinked.
+        assert!(out.contains("PostgreSQL is great"));
+        assert!(out.contains("We also love PostgreSQL"));
+    }
+
+    #[test]
+    fn apply_llm_links_drops_unknown_targets_and_self_refs() {
+        let mut valid = std::collections::HashSet::new();
+        valid.insert("postgres".to_string());
+        let body = "a self ref to me and a bogus link to nothing.\n";
+        let candidates = vec![
+            ("self".to_string(), "self".to_string()), // self-reference
+            ("nothing".to_string(), "nope".to_string()), // target not in valid_slugs
+        ];
+        let (out, hits) = apply_llm_links(body, &candidates, "self", &valid);
+        assert!(hits.is_empty());
+        assert_eq!(out, body, "body must be unchanged when nothing applies");
+    }
+
+    #[test]
+    fn apply_llm_links_skips_anchors_inside_code_fences_and_headings() {
+        let mut valid = std::collections::HashSet::new();
+        valid.insert("postgres".to_string());
+        let body = "# PostgreSQL heading\n\
+                    Inline `PostgreSQL` is code.\n\
+                    Existing [[postgres|pg]] wikilink.\n\
+                    Body mention PostgreSQL here.\n\
+                    ```\n\
+                    PostgreSQL in code fence.\n\
+                    ```\n";
+        let candidates = vec![("PostgreSQL".to_string(), "postgres".to_string())];
+        let (out, hits) = apply_llm_links(body, &candidates, "self", &valid);
+        // The first acceptable occurrence is the prose line.
+        assert_eq!(hits.len(), 1);
+        assert!(out.contains("Body mention [[postgres|PostgreSQL]] here."));
+        // Heading + code-fence + inline-code + existing-wikilink are untouched.
+        assert!(out.contains("# PostgreSQL heading"));
+        assert!(out.contains("Inline `PostgreSQL` is code."));
+        assert!(out.contains("PostgreSQL in code fence."));
+        assert!(out.contains("[[postgres|pg]]"));
+    }
+
+    #[test]
+    fn apply_llm_links_uses_bare_form_when_anchor_equals_slug() {
+        let mut valid = std::collections::HashSet::new();
+        valid.insert("postgres".to_string());
+        let body = "Note about postgres.\n";
+        let candidates = vec![("postgres".to_string(), "postgres".to_string())];
+        let (out, _) = apply_llm_links(body, &candidates, "self", &valid);
+        // anchor == slug → `[[postgres]]`, no pipe form.
+        assert!(out.contains("[[postgres]]"));
+        assert!(!out.contains("[[postgres|"));
+    }
+
+    #[test]
+    fn build_llm_link_prompt_includes_body_and_digest() {
+        let others = vec![(
+            "postgres".to_string(),
+            "PostgreSQL".to_string(),
+            "open-source RDB".to_string(),
+        )];
+        let p = build_llm_link_prompt("indexing", "Pages talk about postgres.", &others);
+        assert!(p.contains("indexing"));
+        assert!(p.contains("Pages talk about postgres."));
+        assert!(p.contains("- postgres — PostgreSQL — open-source RDB"));
+        // The schema instruction is present so the model knows the shape.
+        assert!(p.contains("\"links\":"));
+        assert!(p.contains("target_slug"));
     }
 
     #[test]

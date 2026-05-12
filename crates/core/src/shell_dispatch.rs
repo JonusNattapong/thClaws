@@ -2022,6 +2022,7 @@ pub async fn dispatch(
             name,
             apply,
             min_len,
+            llm,
         } => {
             let names: Vec<String> = match name {
                 Some(n) => vec![n],
@@ -2036,6 +2037,21 @@ pub async fn dispatch(
                     state.config.kms_active.clone()
                 }
             };
+            let provider_opt = if llm {
+                match crate::repl::build_provider(&state.config) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        emit(
+                            events_tx,
+                            format!("/kms link --llm: provider unavailable: {e}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let model_name = state.config.model.clone();
             for kname in &names {
                 let Some(k) = crate::kms::resolve(kname) else {
                     emit(
@@ -2045,11 +2061,24 @@ pub async fn dispatch(
                     continue;
                 };
                 let opts = crate::kms::AutoLinkOptions { min_len, apply };
-                match crate::kms::auto_link(&k, opts) {
+                let result = if let Some(ref prov) = provider_opt {
+                    emit(
+                        events_tx,
+                        format!(
+                            "/kms link {kname} --llm: starting per-page LLM pass with `{model_name}` (this may take a while)…"
+                        ),
+                    );
+                    crate::kms::auto_link_llm(&k, opts, prov.as_ref(), &model_name, &state.cancel)
+                        .await
+                } else {
+                    crate::kms::auto_link(&k, opts)
+                };
+                match result {
                     Ok(report) => {
+                        let mode_tag = if llm { "llm" } else { "deterministic" };
                         let mode = if apply { "applied" } else { "dry-run" };
                         let mut msg = format!(
-                            "/kms link {kname} ({mode}): scanned {} page(s), {} would gain link(s), {} link insertion(s) total.",
+                            "/kms link {kname} ({mode_tag}, {mode}): scanned {} page(s), {} would gain link(s), {} link insertion(s) total.",
                             report.pages_scanned,
                             report.pages_modified,
                             report.links_added,

@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
+import { useVersion } from "../hooks/useVersion";
 import logoDark from "../assets/thClaws-logo-dark.png";
 import logoLight from "../assets/thClaws-logo-light.png";
 import {
@@ -146,6 +147,7 @@ export function ChatView({ active, modalOpen }: Props) {
   const waitingTimerRef = useRef<number | null>(null);
   const firstByteSeenRef = useRef(false);
   const { resolved: themeMode } = useTheme();
+  const version = useVersion();
 
   // Show the slash popup whenever the input begins with `/` and the
   // user isn't mid-prompt for an `ask_user_question`. Hidden during a
@@ -752,7 +754,13 @@ export function ChatView({ active, modalOpen }: Props) {
         className="flex-1 overflow-y-auto p-4 space-y-3"
         style={{ background: "var(--bg-primary)" }}
       >
-        {messages.length === 0 && (
+        {/* Empty-state hero — count only user/assistant turns. System
+            bubbles (MCP "connected" notices, slash-output, skill model
+            notes, etc.) can appear before the user has typed anything;
+            we still want the logo + caption to greet them in that
+            case. The system bubbles render normally in the .map below
+            so the user sees both the hero AND the status messages. */}
+        {messages.every((m) => m.role === "system") && (
           <div
             className="flex flex-col items-center mt-20 select-none"
             style={{ color: "var(--text-secondary)" }}
@@ -760,10 +768,18 @@ export function ChatView({ active, modalOpen }: Props) {
             <img
               src={themeMode === "light" ? logoLight : logoDark}
               alt="thClaws"
-              className="mb-4 opacity-90"
+              className="mb-2 opacity-90"
               style={{ width: 280, height: 280 }}
               draggable={false}
             />
+            {version && (
+              <div
+                className="text-xs font-mono mb-2 opacity-70"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                v{version}
+              </div>
+            )}
             <div className="text-sm">Chat mode — send a message to start</div>
           </div>
         )}

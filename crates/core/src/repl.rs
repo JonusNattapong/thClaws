@@ -475,10 +475,16 @@ pub enum SlashCommand {
     /// other pages' bodies. Dry-run by default; `--apply` writes the
     /// changes. `name == None` iterates over every KMS in the active
     /// set for this session.
+    ///
+    /// `llm == true` swaps the deterministic literal-match pass for a
+    /// per-page LLM call that proposes semantic links the regex
+    /// approach can't see (synonyms, related-concept links). Each
+    /// LLM suggestion is still validated in Rust before writing.
     KmsLink {
         name: Option<String>,
         apply: bool,
         min_len: usize,
+        llm: bool,
     },
     /// Auto-resolve contradictions across pages. Dispatches the built-in
     /// `kms-reconcile` subagent which rewrites outdated pages with History
@@ -2347,17 +2353,21 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
             }
         }
         "link" | "autolink" | "cross-link" => {
-            // `/kms link [<name>] [--apply] [--min-len N]` — defaults
-            // to dry-run; without a name, iterates active KMSes for
-            // this session at dispatch time.
+            // `/kms link [<name>] [--apply] [--min-len N] [--llm]` —
+            // defaults to deterministic dry-run; without a name,
+            // iterates active KMSes for this session at dispatch
+            // time. `--llm` switches to the per-page LLM-driven pass.
             let mut name: Option<String> = None;
             let mut apply = false;
             let mut min_len: usize = 4;
+            let mut llm = false;
             let mut tokens = rest.split_whitespace().peekable();
             while let Some(tok) = tokens.next() {
                 match tok {
                     "--apply" | "--execute" => apply = true,
                     "--dry-run" | "--plan" => apply = false,
+                    "--llm" | "--semantic" => llm = true,
+                    "--no-llm" | "--deterministic" => llm = false,
                     "--min-len" => {
                         match tokens.next().and_then(|s| s.parse::<usize>().ok()) {
                             Some(n) if n >= 2 => min_len = n,
@@ -2385,12 +2395,12 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                     }
                     other => {
                         return SlashCommand::Unknown(format!(
-                            "unknown flag '{other}' — usage: /kms link [<name>] [--apply] [--min-len N]"
+                            "unknown flag '{other}' — usage: /kms link [<name>] [--apply] [--llm] [--min-len N]"
                         ));
                     }
                 }
             }
-            SlashCommand::KmsLink { name, apply, min_len }
+            SlashCommand::KmsLink { name, apply, min_len, llm }
         }
         "drop" | "delete" | "rm" => {
             // `/kms drop <name> [--force]` — destructive. Dry-run by
@@ -3014,11 +3024,14 @@ pub fn render_help() -> &'static str {
      \x20                 Delete a KMS from disk. Dry-run by default;\n  \
      \x20                 prints the would-be-deleted counts. Pass\n  \
      \x20                 --force to actually remove the directory.\n  \
-     /kms link [NAME] [--apply] [--min-len N]\n  \
+     /kms link [NAME] [--apply] [--llm] [--min-len N]\n  \
      \x20                 Insert [[slug]] wikilinks at the first\n  \
      \x20                 literal mention of every page's title /\n  \
      \x20                 aliases / slug inside other pages. Dry-run\n  \
      \x20                 by default. No NAME → iterates active KMSes.\n  \
+     \x20                 --llm switches to a semantic per-page LLM\n  \
+     \x20                 pass (synonyms + related concepts; slower\n  \
+     \x20                 + costs tokens, still dry-run by default).\n  \
      /schedule         List scheduled jobs (use `thclaws schedule add` from\n  \
      \x20                 the shell to create one — multi-line prompts don't\n  \
      \x20                 fit a REPL line)\n  \
@@ -3161,6 +3174,27 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 format!("{}/chat/completions", base.trim_end_matches('/'))
             };
             Ok(Arc::new(OpenAIProvider::new(api_key).with_base_url(url)))
+        }
+        ProviderKind::QwenCloud => {
+            // Singapore-region DashScope (`dashscope-intl.aliyuncs.com`).
+            // Identical wire protocol to mainland DashScope — same
+            // OpenAI-compatible /chat/completions shape. Models use the
+            // short `qc/` prefix in our catalogue; the prefix is
+            // stripped before the request reaches Alibaba's upstream
+            // so it sees the bare `qwen-*` id it expects.
+            let base = std::env::var("QWENCLOUD_BASE_URL").unwrap_or_else(|_| {
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_string()
+            });
+            let url = if base.ends_with("/chat/completions") {
+                base
+            } else {
+                format!("{}/chat/completions", base.trim_end_matches('/'))
+            };
+            Ok(Arc::new(
+                OpenAIProvider::new(api_key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("qc/"),
+            ))
         }
         ProviderKind::ZAi => {
             // Z.ai GLM Coding Plan endpoint. Models use `zai/<id>` form
@@ -3352,6 +3386,7 @@ pub async fn build_provider_with_fallback(
         ProviderKind::OpenRouter,
         ProviderKind::Gemini,
         ProviderKind::DashScope,
+        ProviderKind::QwenCloud,
         ProviderKind::ZAi,
         ProviderKind::ThaiLLM,
         ProviderKind::Ollama,
@@ -7250,7 +7285,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
-                SlashCommand::KmsLink { name, apply, min_len } => {
+                SlashCommand::KmsLink { name, apply, min_len, llm } => {
                     let names: Vec<String> = match name {
                         Some(n) => vec![n],
                         None => {
@@ -7263,6 +7298,26 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             config.kms_active.clone()
                         }
                     };
+                    let model_name = config.model.clone();
+                    let cancel_token = crate::cancel::CancelToken::new();
+                    // Rebuild a provider lazily for the LLM path. The
+                    // CLI's main `provider` was already moved into the
+                    // Agent at session bootstrap, so re-derive from
+                    // `config` here. Costs nothing for deterministic
+                    // runs.
+                    let link_provider: Option<Arc<dyn Provider>> = if llm {
+                        match build_provider(&config) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                println!(
+                                    "{COLOR_YELLOW}/kms link --llm: provider unavailable: {e}{COLOR_RESET}"
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     for kname in &names {
                         let Some(k) = crate::kms::resolve(kname) else {
                             println!(
@@ -7271,11 +7326,27 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             continue;
                         };
                         let opts = crate::kms::AutoLinkOptions { min_len, apply };
-                        match crate::kms::auto_link(&k, opts) {
+                        let result = if let Some(ref prov) = link_provider {
+                            println!(
+                                "{COLOR_DIM}/kms link {kname} --llm: starting per-page LLM pass with model `{model_name}` (this may take a while)…{COLOR_RESET}"
+                            );
+                            crate::kms::auto_link_llm(
+                                &k,
+                                opts,
+                                prov.as_ref(),
+                                &model_name,
+                                &cancel_token,
+                            )
+                            .await
+                        } else {
+                            crate::kms::auto_link(&k, opts)
+                        };
+                        match result {
                             Ok(report) => {
+                                let mode_tag = if llm { "llm" } else { "deterministic" };
                                 let mode = if apply { "applied" } else { "dry-run" };
                                 println!(
-                                    "{COLOR_DIM}/kms link {kname} ({mode}): scanned {} page(s), {} would gain link(s), {} link insertion(s) total.{COLOR_RESET}",
+                                    "{COLOR_DIM}/kms link {kname} ({mode_tag}, {mode}): scanned {} page(s), {} would gain link(s), {} link insertion(s) total.{COLOR_RESET}",
                                     report.pages_scanned,
                                     report.pages_modified,
                                     report.links_added,
