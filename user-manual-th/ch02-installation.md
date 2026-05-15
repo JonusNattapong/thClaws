@@ -131,6 +131,72 @@ local ล้วน ๆ" ด้านล่าง
    - Path → Edit → New → `%LOCALAPPDATA%\Programs\thclaws`
    - OK → เปิดหน้าต่าง PowerShell / terminal ใหม่
 
+## รันผ่าน Docker
+
+สำหรับ headless server, CI runner หรือสภาพแวดล้อม strict
+enterprise ที่ติดตั้ง Rust + Node + GTK/WebKit2GTK บน host
+โดยตรงไม่ได้ — มี image ทางการบน Docker Hub ที่ bundle binary
+`thclaws` ตัวเดียวกัน รัน `--serve` เป็น default และเข้าถึง
+project folder บน host ผ่าน volume bind mount
+
+```bash
+# Pull image
+$ docker pull thclaws/thclaws:latest
+
+# cd เข้าไปใน project ของคุณ จากนั้น:
+$ docker run --rm -it \
+    -v "$(pwd)":/workspace \
+    -p 127.0.0.1:8443:8443 \
+    --env-file .env \
+    thclaws/thclaws:latest
+```
+
+เปิด `http://localhost:8443` ในเบราว์เซอร์ folder ที่ mount ไว้
+จะปรากฏเป็น `/workspace` ใน container thClaws จะเขียน state ของ
+session / plan / team / KMS ลงที่ `./.thclaws/` บน host —
+container restart ก็ไม่หาย
+
+สำหรับการรันยาว ๆ มี `docker-compose.yml` แถมมาในรีโป:
+
+```yaml
+services:
+  thclaws:
+    image: thclaws/thclaws:latest
+    ports: ["127.0.0.1:8443:8443"]
+    volumes:
+      - ./:/workspace
+      - thclaws-config:/root/.config/thclaws
+    env_file: [.env]
+    restart: unless-stopped
+volumes:
+  thclaws-config:
+```
+
+`docker compose up -d` รันขึ้น `docker compose logs -f thclaws`
+ดู log สด ๆ
+
+ข้อสังเกต:
+
+- `--serve` **ไม่มี auth ระดับ application** ใน v0.1 ให้ bind ที่
+  `127.0.0.1` ฝั่ง host แล้วเข้าจากระยะไกลผ่าน SSH tunnel
+  (`ssh -L 8443:localhost:8443 server`) หรือเอา reverse proxy +
+  auth ของคุณเองมาวางหน้า
+- Tag: `:latest` (รุ่น ship ล่าสุด) และ `:edge` (current `main`)
+  pin release tag (เช่น `:0.9.9`) สำหรับ deploy ที่ reproducible
+- Image เป็น multi-arch (`linux/amd64` + `linux/arm64`) `docker
+  pull` เลือก variant ให้อัตโนมัติตาม host
+- API key มาจาก block `--env-file` / `env_file`, env shell ของ
+  host ที่ pass ผ่าน Docker หรือที่อยู่ใน `.thclaws/.env` ของ
+  project ที่ mount เข้ามา — container ไม่มี keychain
+- container รันเป็น root โดย default เพื่อให้เขียน bind-mount
+  บน Linux ได้โดยไม่ต้อง juggle UID override ด้วย `user:
+  "1000:1000"` ใน compose ถ้าใจไม่สบาย
+
+เทคนิคเพิ่มเติม (build chain, ทำไม image ถึงมี GTK + WebKit2GTK
+runtime, workflow ของการ publish) อยู่ที่
+[`docker.md`](../thclaws-technical-manual/docker.md) ใน
+technical manual
+
 ## ทางเลือก: Ollama สำหรับใช้งาน local ล้วน ๆ
 
 ถ้าต้องการรันกับโมเดล local ทั้งหมดโดยไม่ใช้ API key ของ cloud ให้

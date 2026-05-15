@@ -113,6 +113,72 @@ below for those numbers.
    - Path → Edit → New → `%LOCALAPPDATA%\Programs\thclaws`
    - OK → open a new PowerShell / terminal window.
 
+## Run via Docker
+
+For headless servers, CI runners, or "strict environment" deployments
+where installing Rust + Node + GTK/WebKit2GTK on the host isn't an
+option, an official image is published on Docker Hub. It bundles the
+same `thclaws` binary, runs `--serve` mode by default, and reaches the
+host's project folder via a bind mount.
+
+```bash
+# Pull the image
+$ docker pull thclaws/thclaws:latest
+
+# cd into your project, then:
+$ docker run --rm -it \
+    -v "$(pwd)":/workspace \
+    -p 127.0.0.1:8443:8443 \
+    --env-file .env \
+    thclaws/thclaws:latest
+```
+
+Open `http://localhost:8443` in your browser. The mounted folder
+shows up as `/workspace` inside the container; thClaws writes
+session / plan / team / KMS state to `./.thclaws/` on the host, so
+everything survives container restarts.
+
+For a long-running setup, a `docker-compose.yml` is shipped in the
+repo:
+
+```yaml
+services:
+  thclaws:
+    image: thclaws/thclaws:latest
+    ports: ["127.0.0.1:8443:8443"]
+    volumes:
+      - ./:/workspace
+      - thclaws-config:/root/.config/thclaws
+    env_file: [.env]
+    restart: unless-stopped
+volumes:
+  thclaws-config:
+```
+
+`docker compose up -d` brings it up; `docker compose logs -f thclaws`
+tails the live output.
+
+Notes:
+
+- `--serve` has **no application-level auth** in v0.1. Keep the host
+  bind on `127.0.0.1` and reach it remotely via SSH tunnel
+  (`ssh -L 8443:localhost:8443 server`), or put your own reverse
+  proxy + auth in front of it.
+- Tags: `:latest` (most recent ship) and `:edge` (current `main`).
+  Pin a release tag (e.g. `:0.9.9`) for reproducible deploys.
+- The image is multi-arch (`linux/amd64` + `linux/arm64`); `docker
+  pull` picks the right variant for your host.
+- API keys come from the `--env-file` / `env_file` block, the host
+  shell env passed through Docker, or whatever's already in the
+  mounted project's `.thclaws/.env`. The container has no keychain.
+- The container runs as root by default so bind-mount writes work
+  on Linux without UID juggling. Override with `user: "1000:1000"`
+  in compose if that matters to you.
+
+The technical manual's [`docker.md`](../thclaws-technical-manual/docker.md)
+covers the image's build chain, why it carries GTK + WebKit2GTK at
+runtime, and the publish workflow.
+
 ## Optional: Ollama for fully local use
 
 If you want to run entirely against a local model (no cloud API key),
