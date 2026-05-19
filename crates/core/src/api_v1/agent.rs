@@ -39,7 +39,15 @@ pub struct AgentRunRequest {
     /// MCP / policy discovery; read+write for any file tool the agent
     /// invokes. Validated against `THCLAWS_AGENT_WORKSPACE_ROOT` when
     /// set (see [`crate::agent_runtime::validate_workspace_dir`]).
-    pub workspace_dir: String,
+    ///
+    /// dev-plan/26 Phase B: optional. When absent or empty, the
+    /// daemon falls through to its own current working directory.
+    /// Freelancer-mode pods (dev-plan/26) omit the field so the pod's
+    /// own `/workspace` is used. Employee-mode adapters
+    /// (paperclip-adapter for `thclaws_local`, per dev-plan/25)
+    /// always supply it.
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
     /// Optional extra system prompt. Appended to the thClaws default
     /// + skill catalog — does NOT replace them.
     #[serde(default)]
@@ -79,15 +87,38 @@ pub async fn agent_run(
     _auth: AuthOk,
     Json(req): Json<AgentRunRequest>,
 ) -> Result<Response, Response> {
-    // Validate workspace_dir up-front so all paths (sync/SSE/async)
+    // Resolve workspace_dir up-front so all paths (sync/SSE/async)
     // share the same 400 surface.
-    let workspace_dir = validate_workspace_dir(&req.workspace_dir).map_err(|msg| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(OpenAiError::invalid_request(msg, "invalid_workspace_dir")),
-        )
-            .into_response()
-    })?;
+    //
+    // dev-plan/26 Phase B: when the caller omits workspace_dir (or
+    // sends an empty string), fall through to the daemon's CWD. For
+    // a freelancer-mode pod that's typically `/workspace`. The
+    // existing `THCLAWS_AGENT_WORKSPACE_ROOT` gate doesn't apply to
+    // the CWD fallback — operators control the daemon's CWD at
+    // launch time, which IS the safety boundary.
+    let workspace_dir = match req
+        .workspace_dir
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => validate_workspace_dir(raw).map_err(|msg| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(OpenAiError::invalid_request(msg, "invalid_workspace_dir")),
+            )
+                .into_response()
+        })?,
+        None => std::env::current_dir().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(OpenAiError::server_error(format!(
+                    "could not resolve daemon CWD as default workspace_dir: {e}"
+                ))),
+            )
+                .into_response()
+        })?,
+    };
 
     if let Some(callback) = req.x_callback.clone() {
         return agent_run_async(req, workspace_dir, callback).await;
@@ -347,10 +378,37 @@ mod tests {
         });
         let req: AgentRunRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.prompt, "hello");
-        assert_eq!(req.workspace_dir, "/tmp/agent-1");
+        assert_eq!(req.workspace_dir.as_deref(), Some("/tmp/agent-1"));
         assert!(req.stream); // default
         assert!(req.system.is_none());
         assert!(req.x_callback.is_none());
+    }
+
+    #[test]
+    fn deserialize_freelancer_request_without_workspace_dir() {
+        // dev-plan/26 Phase B: pods omit workspace_dir entirely and
+        // the handler falls back to the daemon's CWD.
+        let raw = serde_json::json!({
+            "prompt": "hello",
+        });
+        let req: AgentRunRequest = serde_json::from_value(raw).unwrap();
+        assert!(
+            req.workspace_dir.is_none(),
+            "missing workspace_dir should deserialize as None, not Some(\"\")"
+        );
+    }
+
+    #[test]
+    fn deserialize_workspace_dir_empty_string_accepted() {
+        // Empty-string is treated identically to absent by the handler
+        // (both fall through to CWD). Make sure deserialization itself
+        // doesn't reject the empty value.
+        let raw = serde_json::json!({
+            "prompt": "hello",
+            "workspace_dir": "",
+        });
+        let req: AgentRunRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.workspace_dir.as_deref(), Some(""));
     }
 
     #[test]
@@ -394,21 +452,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_relative_workspace_dir_with_400() {
-        let req = AgentRunRequest {
-            prompt: "hi".into(),
-            workspace_dir: "relative/path".into(),
-            system: None,
-            model: None,
-            session_id: None,
-            stream: true,
-            temperature: None,
-            max_tokens: None,
-            x_callback: None,
-        };
-        // Drive the handler directly. We need to bypass AuthOk; the
-        // validator runs inside agent_run before any provider work, so
-        // we can synthesize the inner validation here.
-        let err = crate::agent_runtime::validate_workspace_dir(&req.workspace_dir).unwrap_err();
+        // When workspace_dir is explicitly supplied, it must be absolute.
+        // (The freelancer fallback to daemon CWD only kicks in when the
+        // field is absent or empty — not when it's set to an invalid value.)
+        let supplied = "relative/path";
+        let err = crate::agent_runtime::validate_workspace_dir(supplied).unwrap_err();
         assert!(err.contains("must be absolute"), "got: {err}");
     }
 }

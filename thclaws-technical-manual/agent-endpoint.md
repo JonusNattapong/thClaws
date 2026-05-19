@@ -62,7 +62,7 @@ Content-Type: application/json
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `prompt` | string | yes | The user turn. Joined from wake/handoff/task markdown by the orchestrator. |
-| `workspace_dir` | string | yes | Absolute path. Daemon's `SkillStore::discover_in` reads `<dir>/.claude/skills/` + `<dir>/.thclaws/skills/`. Rejected with 400 if relative, missing, or outside `THCLAWS_AGENT_WORKSPACE_ROOT` when that env is set. |
+| `workspace_dir` | string | no | Absolute path. Daemon's `SkillStore::discover_in` reads `<dir>/.claude/skills/` + `<dir>/.thclaws/skills/`. Rejected with 400 if relative, missing, or outside `THCLAWS_AGENT_WORKSPACE_ROOT` when that env is set. **Optional since dev-plan/26 Phase B**: when omitted or empty, the daemon falls back to its own CWD. Freelancer-mode pods (dev-plan/26) leave it off; Employee-mode adapters (paperclip-adapter for `thclaws_local`) supply it. |
 | `system` | string | no | Appended to thClaws's default system prompt. Does NOT replace the default — the default carries the tool-aware scaffolding the agent needs. |
 | `model` | string | no | Override the daemon's configured default. Routes via the same `ProviderKind::detect` logic the chat endpoint uses. |
 | `session_id` | string | no | Reserved for session resume across turns. Phase A on the server accepts but does not yet persist; phase B/C will. |
@@ -77,7 +77,8 @@ without versioning the endpoint).
 
 ### `workspace_dir` validation
 
-Hard rules enforced by [`agent_runtime::validate_workspace_dir`][validate]:
+When `workspace_dir` is **supplied**, hard rules enforced by
+[`agent_runtime::validate_workspace_dir`][validate]:
 
 - Must be absolute.
 - Must exist + be a directory.
@@ -89,6 +90,13 @@ Hard rules enforced by [`agent_runtime::validate_workspace_dir`][validate]:
 
 Validation failures return `400 Bad Request` with an
 `invalid_workspace_dir` error code.
+
+When `workspace_dir` is **omitted** (dev-plan/26 Phase B freelancer
+mode), the daemon uses its own current working directory and skips
+the `THCLAWS_AGENT_WORKSPACE_ROOT` check — operators control the
+daemon's CWD at launch time, which IS the safety boundary. The
+caller's omission is interpreted as "use whatever you booted from",
+which for a pod is typically `/workspace`.
 
 [validate]: ../thclaws/crates/core/src/agent_runtime.rs
 
