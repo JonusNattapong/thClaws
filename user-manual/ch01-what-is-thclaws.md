@@ -237,17 +237,41 @@ and how to paste keys.
 
 ## How this manual is organised
 
-**Part I** (chapters 2–19) is reference material: how to install it,
-and then every user-facing feature explained once with the commands
-and configuration you need — sessions, memory, KMS, tools, skills,
-hooks, MCP, subagents, plugins, teams, plan mode, and scheduling.
+22 chapters of reference material — how to install thClaws and then
+every user-facing feature explained once with the commands and
+configuration you need:
 
-**Part II** — walkthroughs of real projects from scratch (static
-landing page, reservation site, news-aggregation agent, ending with
-deploys to Agentic Press Hosting) — is planned for a future revision.
+**Setup**
+- [Chapter 2](ch02-installation.md) — Installation
+- [Chapter 3](ch03-working-directory-and-modes.md) — Working directory + run modes
+- [Chapter 4](ch04-desktop-gui-tour.md) — Desktop GUI tour
+- [Chapter 5](ch05-permissions.md) — Permissions
+- [Chapter 6](ch06-providers-models-api-keys.md) — Providers, models, API keys
 
-If you're new, read chapter 2 next. If you're migrating from Claude
-Code, skip to chapters 6, 7, 11, and 13. If you're already familiar
-with the basics and want what's new, the recent additions live in
-chapter 9 (`/dream`), chapter 15 (`/agent` side-channels), chapter 18
-(plan mode), and chapter 19 (scheduling).
+**Core features**
+- [Chapter 7](ch07-sessions.md) — Sessions and resume
+- [Chapter 8](ch08-memory-and-agents-md.md) — Memory and `AGENTS.md`
+- [Chapter 9](ch09-knowledge-bases-kms.md) — Knowledge bases (KMS), including self-improving auto-learn
+- [Chapter 10](ch10-slash-commands.md) — Slash commands
+- [Chapter 11](ch11-built-in-tools.md) — Built-in tools
+- [Chapter 12](ch12-skills.md) — Skills
+- [Chapter 13](ch13-hooks.md) — Hooks
+- [Chapter 14](ch14-mcp.md) — MCP
+
+**Composing agents**
+- [Chapter 15](ch15-subagents.md) — Subagents
+- [Chapter 16](ch16-plugins.md) — Plugins
+- [Chapter 17](ch17-agent-teams.md) — Agent teams
+- [Chapter 18](ch18-plan-mode.md) — Plan mode
+- [Chapter 19](ch19-scheduling.md) — Scheduling
+- [Chapter 20](ch20-research.md) — `/research` (background research)
+
+**Reaching thClaws from elsewhere**
+- [Chapter 21](ch21-line-and-browser-chat.md) — LINE chat + browser bridge
+- [Chapter 22](ch22-paperclip-adapter.md) — Paperclip adapter (let an orchestrator hire thClaws)
+
+If you're new, read Chapter 2 next. If you're migrating from Claude
+Code, skip to Chapters 6, 7, 11, and 13. If you already know the
+basics and want what's new, the recent additions live in Chapter 9
+(auto-learn, `/dream`), Chapter 15 (`/agent` side-channels),
+Chapter 21 (LINE), and Chapter 22 (Paperclip adapter).

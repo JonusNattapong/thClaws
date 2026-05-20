@@ -154,16 +154,39 @@ key ที่ไหนและอย่างไร
 
 ## คู่มือเล่มนี้จัดเรียงอย่างไร
 
-**ส่วนที่ 1** (บทที่ 2–19) คือ reference อธิบายวิธีติดตั้ง ตามด้วยทุก
-ฟีเจอร์ที่ผู้ใช้สัมผัสได้ ทีละเรื่อง พร้อมคำสั่งและการตั้งค่าที่จำเป็น
-— sessions, memory, KMS, tools, skills, hooks, MCP, subagents,
-plugins, teams, plan mode, scheduling
+คู่มือเล่มนี้ 22 บท จัดเรียงเป็น reference อธิบายวิธีติดตั้งและทุก
+ฟีเจอร์ที่ผู้ใช้สัมผัสได้ ทีละเรื่อง พร้อมคำสั่งและการตั้งค่าที่จำเป็น:
 
-**ส่วนที่ 2** — walkthrough ของโปรเจกต์จริงตั้งแต่เริ่มต้น (landing page
-แบบ static, เว็บจอง, agent รวบรวมข่าว จบด้วย deploy ขึ้น Agentic
-Press Hosting) — เตรียมไว้สำหรับ revision ในอนาคต
+**ตั้งค่าและเริ่มต้น**
+- [บทที่ 2](ch02-installation.md) — ติดตั้ง
+- [บทที่ 3](ch03-working-directory-and-modes.md) — working directory + โหมดการรัน
+- [บทที่ 4](ch04-desktop-gui-tour.md) — ทัวร์ Desktop GUI
+- [บทที่ 5](ch05-permissions.md) — permissions
+- [บทที่ 6](ch06-providers-models-api-keys.md) — providers, models, API keys
+
+**ฟีเจอร์หลัก**
+- [บทที่ 7](ch07-sessions.md) — sessions และ resume
+- [บทที่ 8](ch08-memory-and-agents-md.md) — memory และ AGENTS.md
+- [บทที่ 9](ch09-knowledge-bases-kms.md) — Knowledge bases (KMS) รวมถึง self-improving auto-learn
+- [บทที่ 10](ch10-slash-commands.md) — slash commands
+- [บทที่ 11](ch11-built-in-tools.md) — built-in tools
+- [บทที่ 12](ch12-skills.md) — skills
+- [บทที่ 13](ch13-hooks.md) — hooks
+- [บทที่ 14](ch14-mcp.md) — MCP
+
+**ประกอบ agent ขั้นสูง**
+- [บทที่ 15](ch15-subagents.md) — subagents
+- [บทที่ 16](ch16-plugins.md) — plugins
+- [บทที่ 17](ch17-agent-teams.md) — agent teams
+- [บทที่ 18](ch18-plan-mode.md) — plan mode
+- [บทที่ 19](ch19-scheduling.md) — scheduling
+- [บทที่ 20](ch20-research.md) — `/research` (background research)
+
+**เข้าถึงจากที่อื่น**
+- [บทที่ 21](../user-manual/ch21-line-and-browser-chat.md) — LINE chat + browser bridge *(ภาษาอังกฤษ — ฉบับไทยกำลังตามมา)*
+- [บทที่ 22](ch22-paperclip-adapter.md) — Paperclip adapter (จ้าง thClaws ไปทำงานใน orchestrator)
 
 ถ้าเพิ่งเริ่ม อ่านบทที่ 2 ต่อได้เลย ถ้าย้ายมาจาก Claude Code แนะนำให้
 ข้ามไปบทที่ 6, 7, 11 และ 13 ถ้าคุ้นเคยพื้นฐานแล้วและสนใจของใหม่ ฟีเจอร์
-ที่เพิ่งเพิ่มเข้ามาอยู่ในบทที่ 9 (`/dream`), บทที่ 15 (`/agent`
-side-channels), บทที่ 18 (plan mode) และบทที่ 19 (scheduling)
+ที่เพิ่งเพิ่มเข้ามาอยู่ในบทที่ 9 (auto-learn และ `/dream`), บทที่ 15
+(`/agent` side-channels), บทที่ 21 (LINE) และบทที่ 22 (Paperclip adapter)
