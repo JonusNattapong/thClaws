@@ -2,14 +2,19 @@
 
 ![logo](../user-manual-img/logo/thClaws-logo-line-art-banner.png)
 
-thClaws is a **native-Rust AI agent workspace** that runs locally on
-your machine. Not just coding — it edits code, automates workflows,
-searches your knowledge bases, and coordinates teams of agents, all in
-one binary. You tell it what you want in natural language; it reads
+thClaws is a **native-Rust AI Agent Platform** that runs locally on
+your machine — for building AI Agents that help with a wide range of
+work: writing code, automating workflows, reviewing and organizing
+documents, managing knowledge bases, or assembling teams of agents
+that work together. All in one binary. You tell it what you want in
+natural language; it reads
 your files, runs commands, uses tools, and talks back to you while it
 works.
 
-Four surfaces ship as one binary, sharing a single `Agent` loop, `Session`, and tool registry:
+Six surfaces ship as one binary, sharing a single `Agent` loop,
+`Session`, and tool registry — the first five are for a single person
+(including chatting through LINE on your phone), the sixth lets other
+software hire thClaws to do work:
 
 - **Desktop GUI** (`thclaws` with no flags) — a native window with a
   Terminal tab running the same interactive REPL as `--cli` mode, a
@@ -20,9 +25,20 @@ Four surfaces ship as one binary, sharing a single `Agent` loop, `Session`, and 
   — runs a single turn and exits. Handy for scripts, CI pipelines, and
   shell one-liners. Add `-v` / `--verbose` to see per-turn token usage
   on stderr without polluting stdout.
-- **Webapp** (`thclaws --serve --port 7878`) — same engine over
-  WebSocket/HTTP, served from your laptop. Reach it remotely via SSH
-  tunnel for "thClaws anywhere" without opening a port.
+- **Webapp** (`thclaws --serve --port 7878` + open a browser) — same
+  engine over WebSocket/HTTP, served from your laptop. Reach it
+  remotely via SSH tunnel for "thClaws anywhere" without opening a
+  port.
+- **LINE Chat** (`thclaws --line` or GUI Line Connect modal) — chat
+  with your agent through your own LINE Official Account. Goes
+  through a relay tunnel at `line.thclaws.ai` that bridges the LINE
+  platform and the thClaws running on your machine — the agent stays
+  local but you can reach it from anywhere via your phone (see
+  [Chapter 21](ch21-line-and-browser-chat.md)).
+- **AI Agent (API server)** (`thclaws --serve` + HTTP API) — lets
+  *other software* (orchestrators, external clients, schedulers) call
+  thClaws as an agent over the same HTTP API — details in later
+  chapters.
 
 ## What makes it different
 
@@ -102,6 +118,21 @@ Four surfaces ship as one binary, sharing a single `Agent` loop, `Session`, and 
   side-channel agent mines the 10 most recent sessions, dedupes pages,
   surfaces new insights, and writes a dated audit-trail page — review
   with `git diff`.
+- **API-ready for standard tooling.** `--serve` exposes
+  `/v1/chat/completions` (OpenAI-compatible for Cursor, Aider, n8n,
+  openai-python) and `/agent/run` + `/v1/agent/info` (thClaws-native
+  for orchestrators like thcompany). One agent instance can serve
+  humans and other software at the same time.
+- **Async webhook delivery.** Long-running runs (deploys, builds,
+  multi-step research) send the prompt + `x_callback` and close the
+  connection; thClaws POSTs the terminal result back when done.
+  Survives network blips and orchestrator pod restarts mid-flight.
+- **Transparent cost tracking.** Built-in model catalogue carries
+  per-token-type pricing (input / output / cached read / cache write /
+  reasoning) sourced from
+  [LiteLLM](https://github.com/BerriAI/litellm). Every turn's `usage`
+  block reports all five fields so orchestrators / UIs can compute
+  cost locally without asking the provider.
 - **Three tiers of agent orchestration.**
   - **`Task` tool** — model-driven subagents that block the parent's
     turn. Each gets its own tool registry, recurses up to 3 levels
