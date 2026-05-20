@@ -85,6 +85,12 @@ registry ชุดเดียวกัน — ห้า surface แรกสำ
   **Agent Team** (หลาย process, mailbox + task queue, แต่ละคนมี
   worktree ของตัวเอง) ดู [บทที่ 15](ch15-subagents.md) และ
   [บทที่ 17](ch17-agent-teams.md)
+- **Hire-able as a subagent** — ทิศกลับของ orchestration: thClaws
+  เป็น *worker* ให้ orchestrator ตัวอื่น (เช่น Paperclip / thcompany)
+  จ้างไปทำงาน ทั้งแบบ **Employee** (`thclaws_local` — process บนเครื่อง
+  เดียวกัน) และ **Freelancer** (`thclaws_pod` — pod แยก รันบน VPS / cloud
+  ก็ได้) orchestrator พูดผ่าน HTTP API เดียวกับที่ user/IDE ใช้
+  ([บทที่ 22](ch22-paperclip-adapter.md))
 - **Plan mode** — สำหรับงานหลาย step ให้ agent `EnterPlanMode` แล้ว
   เสนอ step ทีละขั้น ให้ *คุณ* review และอนุมัติก่อนรัน แต่ละ step
   มี retry budget; failure จะหยุด chain เพื่อให้คุณตัดสินใจต่อ

@@ -157,6 +157,13 @@ software hire thClaws to do work:
     pane and optional git worktree. One agent writes your backend
     while a teammate builds the frontend in parallel; lead calls
     `TeamMerge` when both are done.
+- **Hire-able as a subagent.** The inverse direction of orchestration:
+  thClaws itself runs as a *worker* for another orchestrator (e.g.
+  Paperclip / thcompany), in either the **Employee** shape
+  (`thclaws_local` — a process on the same machine) or the
+  **Freelancer** shape (`thclaws_pod` — a standalone pod that can run
+  on a VPS or cloud). The orchestrator drives it through the same
+  HTTP API users and IDEs use. See [Chapter 22](ch22-paperclip-adapter.md).
 - **Plan mode.** For multi-step work, the agent can `EnterPlanMode`,
   propose an ordered list of steps, and let *you* review and approve
   before execution. Each step runs sequentially with its own retry
