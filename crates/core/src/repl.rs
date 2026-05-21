@@ -305,6 +305,14 @@ pub enum SlashCommand {
         name: String,
         user: bool,
     },
+    /// `/mcp reauth <name>` — re-authorize a remote (HTTP) MCP server.
+    /// Clears any cached token for that server and runs a fresh OAuth
+    /// flow: laptop opens the user's browser, pod surfaces a clickable
+    /// auth URL whose redirect lands on `/v1/oauth/callback`. See
+    /// `api_v1::oauth_callback` for the pod-side flow.
+    McpReauth {
+        name: String,
+    },
     Plugins,
     PluginInstall {
         url: String,
@@ -1128,8 +1136,19 @@ fn parse_mcp_subcommand(args: &str) -> SlashCommand {
                 _ => SlashCommand::Unknown("usage: /mcp install [--user] <name>".into()),
             }
         }
+        "reauth" | "login" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            match parts.as_slice() {
+                [name] => SlashCommand::McpReauth {
+                    name: (*name).to_string(),
+                },
+                _ => SlashCommand::Unknown(
+                    "usage: /mcp reauth <name>  (re-authorize a remote MCP server)".into(),
+                ),
+            }
+        }
         other => SlashCommand::Unknown(format!(
-            "unknown mcp subcommand: '{other}' (try: /mcp, /mcp add, /mcp remove, /mcp marketplace, /mcp search, /mcp info, /mcp install)"
+            "unknown mcp subcommand: '{other}' (try: /mcp, /mcp add, /mcp remove, /mcp reauth, /mcp marketplace, /mcp search, /mcp info, /mcp install)"
         )),
     }
 }
@@ -2884,7 +2903,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "skill",    description: "Skill subcommands (install / marketplace / search / info / show)", category: "Extensions", usage: "<sub> [args]" },
         BuiltInCommand { name: "plugins",  description: "List installed plugins",                     category: "Extensions", usage: "" },
         BuiltInCommand { name: "plugin",   description: "Plugin subcommands (install / marketplace / search / info / show / enable / disable)", category: "Extensions", usage: "<sub> [args]" },
-        BuiltInCommand { name: "mcp",      description: "MCP subcommands (add / remove / install / marketplace / search / info)", category: "Extensions", usage: "[sub] [args]" },
+        BuiltInCommand { name: "mcp",      description: "MCP subcommands (add / remove / install / reauth / marketplace / search / info)", category: "Extensions", usage: "[sub] [args]" },
 
         // Team
         BuiltInCommand { name: "team",     description: "Show team agent status",                     category: "Team", usage: "" },
@@ -6341,6 +6360,24 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::McpReauth { name } => {
+                    match crate::mcp::reauth_server(&name, None).await {
+                        Ok(crate::mcp::ReauthOutcome::Completed(msg)) => {
+                            println!("{COLOR_DIM}{msg}{COLOR_RESET}");
+                        }
+                        Ok(crate::mcp::ReauthOutcome::Pending { auth_url, server_name }) => {
+                            println!(
+                                "{COLOR_DIM}[mcp] click to authorize '{server_name}':{COLOR_RESET}\n{auth_url}"
+                            );
+                            println!(
+                                "{COLOR_DIM}[mcp] complete the flow in your browser; the pod's /v1/oauth/callback handles the redirect.{COLOR_RESET}"
+                            );
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}[mcp] reauth failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
                 SlashCommand::Mcp => {
                     if mcp_summary.is_empty() {
                         println!("{COLOR_DIM}no MCP servers configured{COLOR_RESET}");
@@ -8920,6 +8957,22 @@ mod tests {
         // Missing url → Unknown with usage hint.
         assert!(matches!(
             parse_slash("/mcp add weather"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        assert_eq!(
+            parse_slash("/mcp reauth weather"),
+            Some(SlashCommand::McpReauth {
+                name: "weather".into(),
+            })
+        );
+        assert_eq!(
+            parse_slash("/mcp login weather"),
+            Some(SlashCommand::McpReauth {
+                name: "weather".into(),
+            })
+        );
+        assert!(matches!(
+            parse_slash("/mcp reauth"),
             Some(SlashCommand::Unknown(_))
         ));
     }

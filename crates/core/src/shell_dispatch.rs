@@ -2492,6 +2492,34 @@ pub async fn dispatch(
             };
             persist_and_register_mcp(state, events_tx, cfg, user).await;
         }
+        SlashCommand::McpReauth { name } => {
+            let events_tx_clone = events_tx.clone();
+            // OAuth discovery + DCR are HTTP calls — run off the
+            // dispatcher thread so the UI stays responsive while the
+            // user consents in their browser (laptop) or follows the
+            // public callback link (pod).
+            tokio::spawn(async move {
+                let sink = |line: String| {
+                    let _ = events_tx_clone.send(ViewEvent::SlashOutput(line));
+                };
+                match crate::mcp::reauth_server(&name, None).await {
+                    Ok(crate::mcp::ReauthOutcome::Completed(msg)) => sink(msg),
+                    Ok(crate::mcp::ReauthOutcome::Pending {
+                        auth_url,
+                        server_name,
+                    }) => {
+                        sink(format!(
+                            "[mcp] click to authorize '{server_name}':\n{auth_url}"
+                        ));
+                        sink(
+                            "[mcp] the redirect lands on the pod; this slash command exits as soon as the link is open. Watch the chat for `[mcp] reauth complete` after you consent."
+                                .to_string(),
+                        );
+                    }
+                    Err(e) => sink(format!("[mcp] reauth failed: {e}")),
+                }
+            });
+        }
         SlashCommand::McpRemove { name, user } => {
             match crate::config::remove_mcp_server(&name, user) {
                 Ok((true, p)) => {
