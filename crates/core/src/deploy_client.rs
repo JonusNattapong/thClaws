@@ -358,27 +358,36 @@ fn collect_files(
     }
 
     // Also pick up project-root AGENTS.md / CLAUDE.md (the conventional
-    // location for the agents.md standard) — ship them as if they were
-    // .thclaws/AGENTS.md / .thclaws/CLAUDE.md on the pod, so the pod's
-    // ProjectContext::discover walk-up finds them at the
-    // `.thclaws/<NAME>.md` step. Explicit `./.thclaws/AGENTS.md` from
-    // the laptop wins over project-root one (an explicit override is
-    // an explicit override).
+    // location for the agents.md standard) and ship them under the
+    // `__root__/` prefix. The server treats this prefix specially:
+    // entries land at /workspace/<NAME> on the pod, NOT inside
+    // /workspace/.thclaws/, so the pod's ProjectContext::discover walk
+    // (which expects AGENTS.md at the project root, the same way it
+    // does on the laptop) finds them where it expects.
+    //
+    // Why a fake-looking prefix rather than separate endpoints / a
+    // sibling tar: path-safety stays uniform (no '..' games), the
+    // single tar + single manifest endpoint round-trip still works,
+    // and the strict allow-list of names under `__root__/` (server
+    // side) keeps blast radius tight — only AGENTS.md and CLAUDE.md
+    // can land outside .thclaws/, never anything else.
     let Some(project_root) = thclaws_root.parent() else {
         return Ok(out);
     };
     for name in ["AGENTS.md", "CLAUDE.md"] {
-        if out.contains_key(name) {
-            continue; // .thclaws/<name> already shipped, don't shadow it
-        }
         let root_path = project_root.join(name);
         if root_path.is_file() {
-            insert_file(&mut out, name, &root_path)?;
+            insert_file(&mut out, &format!("{ROOT_PREFIX}/{name}"), &root_path)?;
         }
     }
 
     Ok(out)
 }
+
+/// Tar-path prefix marking entries that land at the pod's workspace
+/// root (alongside the project code) instead of inside .thclaws/. The
+/// server enforces a strict allow-list of names under this prefix.
+pub const ROOT_PREFIX: &str = "__root__";
 
 fn insert_file(
     out: &mut BTreeMap<String, FileMeta>,
@@ -548,7 +557,18 @@ fn build_tar(
                 continue;
             }
 
-            let abs = thclaws_root.join(rel);
+            // Most entries are under .thclaws/. Entries prefixed with
+            // `__root__/` (currently only AGENTS.md / CLAUDE.md) sit at
+            // the project root one level up — see collect_files for
+            // the rationale.
+            let abs = if let Some(stripped) = rel.strip_prefix(&format!("{ROOT_PREFIX}/")) {
+                match thclaws_root.parent() {
+                    Some(p) => p.join(stripped),
+                    None => continue,
+                }
+            } else {
+                thclaws_root.join(rel)
+            };
             if !abs.is_file() {
                 continue;
             }

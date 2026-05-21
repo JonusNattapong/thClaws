@@ -53,6 +53,18 @@ const ALLOWED_TOP_LEVEL: &[&str] = &[
     "kms",
 ];
 
+/// Tar-path prefix marking entries that land at the workspace root
+/// (alongside project code) rather than inside `.thclaws/`. Client
+/// sets this via `deploy_client::ROOT_PREFIX`. Only the names in
+/// [`PROJECT_ROOT_ALLOWED`] are accepted under it.
+const ROOT_PREFIX: &str = "__root__";
+
+/// Files the deploy is allowed to write at the workspace root (one
+/// level outside `.thclaws/`). Keep this tight — anything here can
+/// influence the pod's system prompt assembly without sitting in the
+/// atomically-swapped `.thclaws/` tree.
+const PROJECT_ROOT_ALLOWED: &[&str] = &["AGENTS.md", "CLAUDE.md"];
+
 /// Top-level entries the deploy must NEVER touch — these live on the
 /// pod side and survive a deploy. Even if the client uploads them, the
 /// extract phase skips them. (Defense in depth — the client should
@@ -116,7 +128,10 @@ pub async fn deploy_manifest(
                 "invalid_path",
             ));
         }
-        let abs = thclaws_root.join(&entry.path);
+        let abs = match resolve_entry_path(&workspace, &thclaws_root, &entry.path) {
+            Ok(p) => p,
+            Err(msg) => return Err(bad_request(msg, "invalid_path")),
+        };
         match file_sha256(&abs) {
             Ok(Some(have)) if have.eq_ignore_ascii_case(&entry.sha256) => {
                 // Pod already has the file at the same hash — skip.
@@ -273,6 +288,14 @@ async fn extract_tar(body: &Bytes, dest: &Path) -> std::io::Result<ExtractStats>
 
 fn extract_tar_blocking(body: &[u8], dest: &Path) -> std::io::Result<ExtractStats> {
     std::fs::create_dir_all(dest)?;
+    // `dest` is the scratch `.thclaws.deploy-<id>` dir. Workspace root
+    // (where __root__/ entries land) is its parent.
+    let workspace_root = dest.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "extract destination has no parent (workspace root)",
+        )
+    })?;
     let mut archive = tar::Archive::new(body);
     let mut files = 0usize;
     let mut bytes = 0u64;
@@ -291,6 +314,37 @@ fn extract_tar_blocking(body: &[u8], dest: &Path) -> std::io::Result<ExtractStat
             .next()
             .and_then(|c| c.as_os_str().to_str())
             .unwrap_or("");
+
+        // Project-root files: write directly to /workspace/<name>,
+        // bypassing the .thclaws/ scratch + swap. These survive a
+        // deploy the same way pod-side state does — they live outside
+        // the swap region. Per-file write-then-rename gives atomicity.
+        if top == ROOT_PREFIX {
+            let name = path
+                .components()
+                .nth(1)
+                .and_then(|c| c.as_os_str().to_str())
+                .unwrap_or("");
+            if path.components().count() != 2 || !PROJECT_ROOT_ALLOWED.contains(&name) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "tar entry '{path_str}' under '{ROOT_PREFIX}/' must be one of {:?} (no subdirs)",
+                        PROJECT_ROOT_ALLOWED
+                    ),
+                ));
+            }
+            if entry.header().entry_type().is_file() {
+                let final_path = workspace_root.join(name);
+                let tmp_path = workspace_root.join(format!(".{name}.deploy-tmp"));
+                entry.unpack(&tmp_path)?;
+                std::fs::rename(&tmp_path, &final_path)?;
+                files += 1;
+                bytes += entry.header().size().unwrap_or(0);
+            }
+            continue;
+        }
+
         if !ALLOWED_TOP_LEVEL.contains(&top) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -312,6 +366,26 @@ fn extract_tar_blocking(body: &[u8], dest: &Path) -> std::io::Result<ExtractStat
         }
     }
     Ok(ExtractStats { files, bytes })
+}
+
+/// Resolve a client-supplied relative path to its on-pod absolute
+/// destination. `__root__/<NAME>` → `<workspace>/<NAME>` (with name in
+/// [`PROJECT_ROOT_ALLOWED`]); everything else → `<workspace>/.thclaws/<path>`.
+fn resolve_entry_path(
+    workspace: &Path,
+    thclaws_root: &Path,
+    rel: &str,
+) -> Result<PathBuf, String> {
+    if let Some(stripped) = rel.strip_prefix(&format!("{ROOT_PREFIX}/")) {
+        if stripped.contains('/') || !PROJECT_ROOT_ALLOWED.contains(&stripped) {
+            return Err(format!(
+                "path '{rel}' under '{ROOT_PREFIX}/' must be one of {:?} (no subdirs)",
+                PROJECT_ROOT_ALLOWED
+            ));
+        }
+        return Ok(workspace.join(stripped));
+    }
+    Ok(thclaws_root.join(rel))
 }
 
 /// Seed `scratch` with a copy of the live `.thclaws/` so that files
@@ -493,6 +567,7 @@ mod tests {
     fn is_safe_rel_path_blocks_traversal_and_preserved_dirs() {
         assert!(is_safe_rel_path("skills/foo/SKILL.md"));
         assert!(is_safe_rel_path("settings.json"));
+        assert!(is_safe_rel_path("__root__/AGENTS.md"));
         assert!(!is_safe_rel_path("../etc/passwd"));
         assert!(!is_safe_rel_path("/etc/passwd"));
         assert!(!is_safe_rel_path("skills/../etc"));
@@ -501,5 +576,28 @@ mod tests {
         assert!(!is_safe_rel_path("memory/private.md"));
         assert!(!is_safe_rel_path(".env"));
         assert!(!is_safe_rel_path(""));
+    }
+
+    #[test]
+    fn resolve_entry_path_routes_root_prefix() {
+        let ws = Path::new("/workspace");
+        let tc = ws.join(".thclaws");
+
+        assert_eq!(
+            resolve_entry_path(ws, &tc, "__root__/AGENTS.md").unwrap(),
+            ws.join("AGENTS.md")
+        );
+        assert_eq!(
+            resolve_entry_path(ws, &tc, "__root__/CLAUDE.md").unwrap(),
+            ws.join("CLAUDE.md")
+        );
+        assert_eq!(
+            resolve_entry_path(ws, &tc, "settings.json").unwrap(),
+            tc.join("settings.json")
+        );
+        // unknown name under __root__/ → rejected
+        assert!(resolve_entry_path(ws, &tc, "__root__/evil.sh").is_err());
+        // subdir under __root__/ → rejected
+        assert!(resolve_entry_path(ws, &tc, "__root__/sub/AGENTS.md").is_err());
     }
 }
