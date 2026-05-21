@@ -599,14 +599,14 @@ pub enum SlashCommand {
         all_sessions: bool,
     },
     /// `/deploy [--pod URL] [--token TOKEN] [--dry-run] [--full]
-    /// [--include-memory] [--allow-stdio-mcp] [--restart]` — ship the
-    /// current project's .thclaws/ to a thclaws --serve pod. URL +
-    /// token default to the configured deploy target
-    /// (remote_agent_url + remote-agent-token keychain entry).
-    /// `--restart` POSTs /v1/restart after the swap so MCP servers,
+    /// [--include-memory] [--allow-stdio-mcp] [--no-restart]` — ship
+    /// the current project's .thclaws/ to a thclaws --serve pod.
+    /// URL + token default to the configured deploy target
+    /// (remote_agent_url + remote-agent-token keychain entry). The
+    /// pod is restarted by default after the swap so MCP servers,
     /// plugin runtimes, skill caches, and the system prompt
-    /// re-initialise (otherwise the running process keeps its
-    /// pre-deploy snapshot). See dev-plan/28.
+    /// re-initialise; pass --no-restart to keep the running process
+    /// up. See dev-plan/28.
     Deploy {
         pod: Option<String>,
         token: Option<String>,
@@ -1444,9 +1444,10 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
 }
 
 /// Parse `/deploy [--pod URL] [--token TOKEN] [--dry-run] [--full]
-/// [--include-memory] [--allow-stdio-mcp] [--restart]`. All flags
+/// [--include-memory] [--allow-stdio-mcp] [--no-restart]`. All flags
 /// optional — missing URL/token fall back to the configured
-/// remote-agent target (see dev-plan/28).
+/// remote-agent target (see dev-plan/28). The pod is restarted by
+/// default; `--no-restart` opts out.
 fn parse_deploy_subcommand(args: &str) -> SlashCommand {
     let mut pod: Option<String> = None;
     let mut token: Option<String> = None;
@@ -1454,7 +1455,7 @@ fn parse_deploy_subcommand(args: &str) -> SlashCommand {
     let mut full = false;
     let mut include_memory = false;
     let mut allow_stdio_mcp = false;
-    let mut restart = false;
+    let mut restart = true;
     let mut tokens = args.split_whitespace().peekable();
     while let Some(tok) = tokens.next() {
         match tok {
@@ -1462,7 +1463,10 @@ fn parse_deploy_subcommand(args: &str) -> SlashCommand {
             "--full" | "--no-diff" => full = true,
             "--include-memory" => include_memory = true,
             "--allow-stdio-mcp" => allow_stdio_mcp = true,
+            // Default-on — accepted as a no-op for muscle-memory
+            // compatibility with v0.13.4's --restart opt-in flag.
             "--restart" => restart = true,
+            "--no-restart" => restart = false,
             "--pod" => {
                 pod = tokens.next().map(|s| s.to_string());
                 if pod.as_deref().is_none() {
@@ -1483,7 +1487,7 @@ fn parse_deploy_subcommand(args: &str) -> SlashCommand {
             }
             other => {
                 return SlashCommand::Unknown(format!(
-                    "unknown arg '{other}' — usage: /deploy [--pod URL] [--token T] [--dry-run] [--full] [--include-memory] [--allow-stdio-mcp] [--restart]"
+                    "unknown arg '{other}' — usage: /deploy [--pod URL] [--token T] [--dry-run] [--full] [--include-memory] [--allow-stdio-mcp] [--no-restart]"
                 ));
             }
         }
@@ -2890,7 +2894,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "research", description: "Background research → KMS",                  category: "Research", usage: "<query> | list | status <id> | show <id> | cancel <id> | wait <id>" },
 
         // Deploy
-        BuiltInCommand { name: "deploy",   description: "Ship .thclaws/ to a remote pod (dev-plan/28)", category: "Deploy", usage: "[--pod URL] [--token T] [--dry-run] [--full] [--restart]" },
+        BuiltInCommand { name: "deploy",   description: "Ship .thclaws/ to a remote pod (dev-plan/28)", category: "Deploy", usage: "[--pod URL] [--token T] [--dry-run] [--full] [--no-restart]" },
 
         // System
         BuiltInCommand { name: "help",     description: "Show this help",                             category: "System", usage: "" },

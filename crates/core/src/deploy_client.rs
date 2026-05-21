@@ -32,8 +32,12 @@ pub struct DeployArgs {
     pub full: bool,
     /// After a successful deploy, POST `/v1/restart` so the pod
     /// re-initialises MCP servers, plugin runtimes, skill caches, and
-    /// the system prompt. Otherwise the running --serve process keeps
-    /// its pre-deploy snapshot until the next natural restart.
+    /// the system prompt. Default-on — the snapshot the running
+    /// process holds (MCP handles, system prompt, KMS load) is
+    /// otherwise frozen at startup, which makes a "successful" deploy
+    /// invisible to the model. Pass `--no-restart` to keep the
+    /// running process up across the deploy (rare: hot config edits
+    /// the snapshot doesn't read).
     pub restart: bool,
 }
 
