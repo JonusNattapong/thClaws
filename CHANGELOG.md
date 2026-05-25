@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-05-25
+
+Telegram bot adapter — chat with your local thClaws agent from Telegram.
+
+### Added
+
+- **Telegram bot adapter (Tier 1).** Create a bot with `@BotFather`,
+  connect it from the desktop (Settings → **Telegram Connect**) or run it
+  headless with `thclaws --telegram`, and DM your local agent from
+  anywhere. The agent and all its tools stay on your machine; Telegram is
+  only the chat surface, and there is **no relay** — thClaws talks to the
+  Bot API directly via long-polling (works behind NAT).
+
+  - DM + basic group support; pairing-code onboarding (the owner approves
+    new users from the GUI); HTML-formatted replies chunked to Telegram's
+    4096-character message limit.
+  - Tool calls that need approval surface as **inline-keyboard buttons**
+    (Allow / Always / Deny) via a new `telegramgated` permission mode —
+    approve `Bash`/`Edit`/`Write` from your phone.
+  - `thclaws telegram status | pair` CLI; env-first token
+    (`TELEGRAM_BOT_TOKEN`), `TELEGRAM_OWNER_ID` for instant headless
+    allowlisting.
+  - Docs: new Chapter 23 in the EN + TH user manuals and
+    `telegram-bridge.md` in the technical manual.
+
+### Fixed
+
+- **Agent SDK: avoid `ARG_MAX` on large system prompts**
+  ([#124](https://github.com/thClaws/thClaws/pull/124),
+  [@gobikom](https://github.com/gobikom)). The Agent SDK provider passed
+  the assembled system prompt as a single `--system-prompt` CLI argument;
+  with MCP tools + CLAUDE.md + skills + memory + KMS it can exceed Linux's
+  128 KB `MAX_ARG_STRLEN` → `spawn claude: Argument list too long`,
+  blocking `agent/claude-*` models in `--cli` when MCP servers are
+  registered. The prompt is now written to a temp file and passed via
+  `--system-prompt-file`.
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
 ## [0.18.0] — 2026-05-24
 
 One-shot schedules ("run once in 15 minutes / tomorrow at 9am"), plus
