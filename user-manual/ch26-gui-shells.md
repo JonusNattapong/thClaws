@@ -79,11 +79,11 @@ After Tier 2:
    `project`), declared permissions, and any past sessions for that
    shell with one-click resume.
 3. Click a card → the picked shell replaces the picker in the Shell
-   tab. (Mode A is single-shell-at-a-time as of v0.24 — multi-instance
-   shell tabs land in a later release alongside multi-tenant `--serve`
-   from [dev-plan/35](../dev-plan/35-multi-tenant-serve.md).) Use the
-   "shells" breadcrumb to return to the picker and pick a different
-   shell.
+   tab. Mode A is single-shell-at-a-time as of v0.24 — multi-instance
+   shell tabs are still pending in a later release. (Multi-tenant
+   `--serve` for hosting one shell to many users HAS shipped — see
+   "Multi-tenant" below.) Use the "shells" breadcrumb to return to
+   the picker and pick a different shell.
 4. **"Refresh shells"** button rescans the discovery folders without
    restarting thClaws.
 
@@ -195,6 +195,62 @@ If `--gui-shell` is omitted, the launcher reads
 `guiShell.serveDefault` (or the shorthand `guiShell` if it's a
 string) from `settings.json`. If neither is set, `--serve` keeps its
 current behaviour — serves the regular React frontend.
+
+### Multi-tenant — one shell, many users
+
+Everything above ("Mode B") is **single-tenant**: every visitor to
+the URL shares one agent + one session + one storage. That's the
+right model when you're sharing a shell with a teammate or running
+it for yourself from your phone.
+
+When you want to *host* a shell for many users — each with their own
+conversation, their own gui-shell storage, their own output files —
+add `--multi-tenant` and a shared HMAC secret:
+
+```sh
+thclaws --serve --gui-shell my-image-bot \
+        --multi-tenant \
+        --multi-tenant-secret "$THCLAWS_CLOUD_HMAC_SECRET" \
+        --port 8080
+```
+
+(The `--multi-tenant-secret` flag also accepts `THCLAWS_CLOUD_HMAC_SECRET`
+from the environment, which is the common deployment pattern.)
+
+This mode expects requests to arrive from a trusted routing layer
+(typically thClaws.cloud) that attaches three signed headers per
+request:
+
+```
+X-Thclaws-User:       <user_id>           # filesystem-safe, [a-zA-Z0-9_-], ≤64 chars
+X-Thclaws-User-Ts:    <unix_seconds>
+X-Thclaws-User-Proof: hex(HMAC-SHA256(secret, "<user_id>:<ts>"))
+```
+
+What you get:
+
+- **Separate agent + session per user** — alice and bob hosted in
+  the same pod see independent conversations.
+- **Per-user storage** — `thclaws.storage.set("notes", …)` from
+  alice's shell goes to `users/alice/storage/<shell>/…`; bob's goes
+  to `users/bob/...`. No collisions on the same key.
+- **Per-user output** — files the agent generates land at
+  `output/users/<id>/...` and the file-asset URL won't serve another
+  user's subtree even if the URL is guessed.
+- **LRU + idle eviction** — `--multi-tenant-max-users 1000` (default)
+  and `--multi-tenant-idle-timeout 30m` (default) bound resource use.
+- **Restart-resumable** — alice's session JSONLs survive pod restart;
+  she reconnects and her prior conversation reloads from disk.
+
+The shell author writes **the same shell** as for single-tenant Mode
+B — no code change required. The bridge automatically routes
+storage / file-asset calls through the per-user prefix.
+
+This is what powers thClaws.cloud (dev-plan/34). For the full
+contract — HMAC signing recipe, on-disk layout, registry semantics,
+curl smoke recipe, what Tier 1 does NOT include (object storage,
+cross-pod state portability, cgroup-style resource limits) — see
+[`thclaws-technical-manual/multi-tenant-serve.md`](../thclaws-technical-manual/multi-tenant-serve.md).
 
 ---
 

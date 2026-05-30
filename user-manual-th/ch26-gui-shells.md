@@ -75,11 +75,11 @@ Mode A เป็น default Mode B (Tier 2) ใช้สำหรับเรี
 2. ทุก card แสดง icon, ชื่อ, version, source (`builtin` / `user`
    / `project`), permission ที่ประกาศไว้ และ session ที่ผ่านมา
    ของ shell นั้น (resume ได้คลิกเดียว)
-3. คลิก card → shell ที่เลือกแทนที่ picker ใน Shell tab (Mode A
-   เปิดได้ทีละ shell ใน v0.24 — multi-instance shell tabs จะลงใน
-   release ถัดไปพร้อมกับ multi-tenant `--serve` ใน
-   [dev-plan/35](../dev-plan/35-multi-tenant-serve.md)) ใช้
-   breadcrumb "shells" เพื่อกลับมา picker แล้วเลือก shell อื่น
+3. คลิก card → shell ที่เลือกแทนที่ picker ใน Shell tab — Mode A
+   เปิดได้ทีละ shell ใน v0.24, multi-instance shell tabs ยังอยู่ใน
+   release ถัดไป (ส่วน multi-tenant `--serve` สำหรับ host shell
+   เดียวให้ผู้ใช้หลายคนได้ลงแล้ว — ดูหัวข้อ "Multi-tenant" ด้านล่าง)
+   ใช้ breadcrumb "shells" เพื่อกลับมา picker แล้วเลือก shell อื่น
 4. ปุ่ม **"Refresh shells"** rescan folder discovery โดยไม่ต้อง
    restart thClaws
 
@@ -190,6 +190,61 @@ Pattern guardrail เดียวกับ `--dangerously-skip-permissions`
 ถ้าไม่ใส่ `--gui-shell` launcher จะอ่าน `guiShell.serveDefault`
 (หรือ shorthand `guiShell` ถ้าเป็น string) จาก `settings.json`
 ถ้าไม่ได้ตั้ง `--serve` จะทำงานเดิม — serve React frontend ปกติ
+
+### Multi-tenant — shell เดียว, ผู้ใช้หลายคน
+
+ทุกอย่างข้างต้น ("Mode B") เป็น **single-tenant** — ทุกคนที่เข้า
+URL เดียวกันจะแชร์ agent / session / storage ก้อนเดียว
+เหมาะตอนแชร์ shell ให้เพื่อนร่วมทีมหรือใช้กับมือถือตัวเอง
+
+ถ้าอยาก *host* shell ให้ผู้ใช้หลายคน — ต่างคนต่างมีบทสนทนา
+gui-shell storage และไฟล์ output ของตัวเอง — เพิ่ม `--multi-tenant`
+กับ HMAC secret ที่แชร์กัน:
+
+```sh
+thclaws --serve --gui-shell my-image-bot \
+        --multi-tenant \
+        --multi-tenant-secret "$THCLAWS_CLOUD_HMAC_SECRET" \
+        --port 8080
+```
+
+(`--multi-tenant-secret` รับจาก env `THCLAWS_CLOUD_HMAC_SECRET`
+ได้ด้วย — รูปแบบที่ใช้ตอน deploy จริง)
+
+โหมดนี้คาดว่า request มาจาก routing layer ที่เชื่อถือได้
+(ปกติคือ thClaws.cloud) ซึ่งจะแนบ 3 header ที่เซ็นแล้วมาทุก request:
+
+```
+X-Thclaws-User:       <user_id>           # filesystem-safe, [a-zA-Z0-9_-], ≤64 ตัว
+X-Thclaws-User-Ts:    <unix_seconds>
+X-Thclaws-User-Proof: hex(HMAC-SHA256(secret, "<user_id>:<ts>"))
+```
+
+สิ่งที่จะได้:
+
+- **Agent + session แยกต่อ user** — alice กับ bob ใน pod เดียวกัน
+  ต่างคนต่างมีบทสนทนา
+- **Storage แยกต่อ user** — `thclaws.storage.set("notes", …)` ของ
+  alice ไป `users/alice/storage/<shell>/…` ของ bob ไป
+  `users/bob/...` ไม่ชนกันบน key เดียวกัน
+- **Output แยกต่อ user** — ไฟล์ที่ agent สร้างไปอยู่ที่
+  `output/users/<id>/...` และ file-asset URL จะไม่ serve subtree
+  ของ user อื่นแม้จะเดา URL ได้
+- **LRU + idle eviction** — `--multi-tenant-max-users 1000` (default)
+  กับ `--multi-tenant-idle-timeout 30m` (default) คุม resource
+- **Restart-resumable** — session JSONL ของ alice รอด pod restart
+  เมื่อ alice เชื่อมต่อใหม่บทสนทนาเดิมจะโหลดกลับมาจาก disk
+
+Shell author เขียน **shell เหมือนเดิม** เป๊ะกับ single-tenant Mode B
+— ไม่ต้องแก้ code อะไร bridge จะ route storage / file-asset
+ผ่าน prefix ต่อ user ให้อัตโนมัติ
+
+นี่คือสิ่งที่อยู่เบื้องหลัง thClaws.cloud (dev-plan/34)
+สำหรับ contract เต็ม — สูตรเซ็น HMAC, layout บน disk, semantics
+ของ registry, curl smoke recipe, และสิ่งที่ Tier 1 ยังไม่มี
+(object storage, cross-pod state portability, cgroup-style
+resource limits) — ดู
+[`thclaws-technical-manual/multi-tenant-serve.md`](../thclaws-technical-manual/multi-tenant-serve.md)
 
 ---
 
