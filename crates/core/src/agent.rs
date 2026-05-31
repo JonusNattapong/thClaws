@@ -907,6 +907,16 @@ impl Agent {
         self.system = text.into();
     }
 
+    /// Read-only view of the captured system prompt. Used by
+    /// regression tests that verify `set_system` / `append_system`
+    /// land what they claim — particularly the
+    /// `refresh_repl_system_prompt` addendum-preservation path,
+    /// where wiping the team-role addenda would be a silent failure
+    /// otherwise.
+    pub fn system_text(&self) -> &str {
+        &self.system
+    }
+
     pub fn history_snapshot(&self) -> Vec<Message> {
         self.history.lock().expect("history lock").clone()
     }

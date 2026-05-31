@@ -818,6 +818,11 @@ pub async fn dispatch(
                 }
                 _ => String::new(),
             };
+            // Insurance: if any mid-session mutation (folder instructions
+            // edit, ad-hoc memory file write, etc.) bypassed its own
+            // rebuild, /compact is a natural moment to resync. Cheap —
+            // just re-runs build_full_system_prompt and calls set_system.
+            state.rebuild_system_prompt();
             emit(
                 events_tx,
                 format!(
@@ -826,6 +831,14 @@ pub async fn dispatch(
                     compacted.len()
                 ),
             );
+        }
+        SlashCommand::ReloadPrompt => {
+            // GUI mirror of the CLI `/reload-prompt`. Rebuilds
+            // state.system_prompt from current state (skills / MCP /
+            // KMS / memory / AGENTS.md) and pushes it into the agent
+            // via set_system — no process re-exec, no history loss.
+            state.rebuild_system_prompt();
+            emit(events_tx, "[reload-prompt] system prompt rebuilt".into());
         }
         SlashCommand::Reload => {
             emit(
@@ -905,6 +918,9 @@ pub async fn dispatch(
             if let Some(store) = &state.session_store {
                 let _ = store.save(&mut state.session);
             }
+            // Insurance — same rationale as /compact above. Any mid-session
+            // mutation that bypassed its own rebuild gets resynced here.
+            state.rebuild_system_prompt();
             let display = crate::shared_session::DisplayMessage::from_messages(&summary_history);
             let _ = events_tx.send(crate::shared_session::ViewEvent::HistoryReplaced(display));
             let _ = events_tx.send(crate::shared_session::ViewEvent::SessionListRefresh(

@@ -428,6 +428,16 @@ pub enum SlashCommand {
     /// (--serve) and laptop (GUI/CLI). For a real container restart
     /// that picks up a new image, use `/deploy --restart` instead.
     Reload,
+    /// Rebuild the agent's system prompt in-place from the current
+    /// project state (skills, MCP instructions, KMS catalogue,
+    /// memory, AGENTS.md, etc.) without re-execing. Use after
+    /// editing AGENTS.md / memory files / KMS catalogue when you
+    /// want the change to reach the model before the next /reload.
+    /// Mid-session mutators that the REPL already knows about
+    /// (`/mcp add`, `/skill install`, `/kms use`, …) rebuild
+    /// automatically — this is the escape hatch for everything
+    /// else.
+    ReloadPrompt,
     Doctor,
     Skills,
     /// Org-policy SSO subcommands (Phase 4).
@@ -1561,6 +1571,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         },
         "fork" => SlashCommand::Fork,
         "reload" | "restart" => SlashCommand::Reload,
+        "reload-prompt" | "reload_prompt" | "refresh-prompt" => SlashCommand::ReloadPrompt,
         "doctor" | "diag" => SlashCommand::Doctor,
         "sso" => match args.trim() {
             "" | "status" => SlashCommand::Sso {
@@ -3172,6 +3183,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "compact",  description: "Compact history (drop oldest, keep recent)", category: "Session", usage: "" },
         BuiltInCommand { name: "fork",     description: "Save + start a new session seeded with a summary", category: "Session", usage: "" },
         BuiltInCommand { name: "reload",   description: "Re-exec thclaws (re-init MCP / system prompt; sessions survive)", category: "Session", usage: "" },
+        BuiltInCommand { name: "reload-prompt", description: "Rebuild system prompt from current state (skills/MCP/KMS/memory) without re-exec", category: "Session", usage: "" },
         BuiltInCommand { name: "save",     description: "Force-save the current session",             category: "Session", usage: "" },
         BuiltInCommand { name: "load",     description: "Load a saved session by id or name",         category: "Session", usage: "ID|NAME" },
         BuiltInCommand { name: "sessions", description: "List saved sessions",                        category: "Session", usage: "" },
@@ -4213,6 +4225,49 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     Ok(())
 }
 
+/// Recompose the REPL agent's system prompt from current project
+/// state. Mirrors what `shared_session::rebuild_system_prompt` does
+/// for the GUI worker — pre-fix the CLI captured `self.system` once
+/// at startup (line ~4396) and never refreshed it, so mid-session
+/// `/mcp add` / `/skill install` / `/kms use` etc. left their
+/// contributions stranded in the live registries but absent from the
+/// model's system prompt until `/reload` (full re-exec). The handle
+/// (not the local snapshot) is the live skill catalog — `/skill
+/// install` and `/plugin install` write through it, so reading from
+/// it here picks up the additions automatically.
+fn refresh_repl_system_prompt(
+    agent: &mut Agent,
+    system: &mut String,
+    config: &AppConfig,
+    cwd: &std::path::Path,
+    skill_store_handle: &Option<std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>>,
+    mcp_clients: &[std::sync::Arc<crate::mcp::McpClient>],
+    addendum: &str,
+) {
+    let mcp_instructions = crate::mcp::collect_mcp_instructions(mcp_clients);
+    let store_guard = skill_store_handle.as_ref().and_then(|h| h.lock().ok());
+    let mut new_system = crate::prompts::build_full_system_prompt(
+        config,
+        cwd,
+        store_guard.as_deref(),
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Repl,
+    );
+    // Re-apply the lead/teammate addendum that the team-agent setup
+    // pushed onto `system` / `agent.system` before the slash loop
+    // started. Without this, `/mcp add` / `/skill install` / `/kms
+    // use` / `/reload-prompt` would silently drop the lead
+    // delegation rules (lead mode) or the agent role + team
+    // coordination rules (teammate mode) — set_system replaces
+    // wholesale, and build_full_system_prompt has no knowledge of
+    // those addenda.
+    if !addendum.is_empty() {
+        new_system.push_str(addendum);
+    }
+    agent.set_system(new_system.clone());
+    *system = new_system;
+}
+
 /// Interactive REPL. Reads from stdin via `rustyline`, streams assistant
 /// output live, handles slash commands. Runs until `/quit`, EOF, or Ctrl-C.
 pub async fn run_repl(mut config: AppConfig) -> Result<()> {
@@ -4273,6 +4328,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         )));
     }
     let task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
+    // Accumulates everything that gets pushed onto `system` (or fed via
+    // `agent.append_system(...)`) AFTER the initial build — currently the
+    // lead-mode `lead` template (line ~4602) and the teammate-mode role +
+    // team_rules (lines ~4695, ~4762). `refresh_repl_system_prompt`
+    // re-appends this to the freshly-built base on every refresh so
+    // mid-session `/mcp add` / `/skill install` / `/kms use` / etc.
+    // don't silently wipe the team-role context.
+    let mut system_addendum = String::new();
     let team_agent_name = std::env::var("THCLAWS_TEAM_AGENT").ok();
     let team_role = team_agent_name.as_deref().unwrap_or("lead");
     // Team feature is opt-in (teamEnabled: true in settings.json). Teammate
@@ -4556,11 +4619,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     })
                     .collect();
-                system.push_str(&crate::prompts::render_named(
+                let lead_text = crate::prompts::render_named(
                     "lead",
                     crate::prompts::defaults::LEAD,
                     &[("members", &members.join(", "))],
-                ));
+                );
+                system.push_str(&lead_text);
+                // Track so refresh_repl_system_prompt re-applies the
+                // lead rules after any mid-session rebuild.
+                system_addendum.push_str(&lead_text);
             }
         }
     }
@@ -4649,10 +4716,18 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         agent_defs.apply_builtin_subagent_overrides(&config);
         if let Some(def) = agent_defs.get(agent_name) {
             if !def.instructions.is_empty() {
-                agent.append_system(&format!(
+                let role_text = format!(
                     "\n\n# Agent Role: {}\n{}\n",
                     def.description, def.instructions
-                ));
+                );
+                agent.append_system(&role_text);
+                // Keep local `system` in sync with agent.system so a
+                // model swap (line ~5713) preserves the role on its
+                // `Agent::new(... system.clone())`. Also track in
+                // system_addendum so refresh_repl_system_prompt
+                // re-applies after rebuilding.
+                system.push_str(&role_text);
+                system_addendum.push_str(&role_text);
             }
         }
 
@@ -4717,6 +4792,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             ],
         );
         agent.append_system(&team_rules);
+        // Mirror role-text comment above: keep local `system` and
+        // system_addendum in sync with agent.system so model swap +
+        // refresh both preserve the team coordination rules.
+        system.push_str(&team_rules);
+        system_addendum.push_str(&team_rules);
         let team_dir = std::env::var("THCLAWS_TEAM_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| crate::team::Mailbox::default_dir());
@@ -6432,6 +6512,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     *store = refreshed;
                                 }
                             }
+                            // Refresh system prompt so the plugin's contributed
+                            // skills land in the catalogue section immediately.
+                            // MCP servers still need /reload (live tool registry
+                            // doesn't track per-plugin server lifecycle).
+                            refresh_repl_system_prompt(
+                                &mut agent,
+                                &mut system,
+                                &config,
+                                &cwd,
+                                &skill_store_handle,
+                                &mcp_clients,
+                                &system_addendum,
+                            );
                             // Skills + commands are live (skill store
                             // refreshed above; commands re-discover per
                             // /-resolution call). MCP servers are the
@@ -6723,7 +6816,21 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 }
                                 mcp_summary.push((name.clone(), names.clone()));
                                 mcp_clients.push(client);
-                                // 3. Rebuild agent so it picks up the new tools.
+                                // 3. Refresh system prompt so the new server's
+                                //    InitializeResult.instructions land in the
+                                //    `# MCP server instructions` section. Must
+                                //    happen BEFORE the Agent::new below — that
+                                //    constructor captures `system` by value.
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
+                                // 4. Rebuild agent so it picks up the new tools.
                                 //    Preserve history so the conversation keeps going.
                                 let prev_history = agent.history_snapshot();
                                 agent = Agent::new(
@@ -6799,6 +6906,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 }
                                 mcp_summary.push((name.clone(), names.clone()));
                                 mcp_clients.push(client);
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
                                 let prev_history = agent.history_snapshot();
                                 agent = Agent::new(
                                     build_provider(&config)?,
@@ -6952,6 +7068,21 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     let _ = std::io::stdout().flush();
                     let err = crate::util::reexec_self();
                     println!("{COLOR_YELLOW}[reload] re-exec failed: {err}{COLOR_RESET}");
+                }
+                SlashCommand::ReloadPrompt => {
+                    refresh_repl_system_prompt(
+                        &mut agent,
+                        &mut system,
+                        &config,
+                        &cwd,
+                        &skill_store_handle,
+                        &mcp_clients,
+                        &system_addendum,
+                    );
+                    println!(
+                        "{COLOR_DIM}[reload-prompt] system prompt rebuilt from current state ({} bytes){COLOR_RESET}",
+                        system.len()
+                    );
                 }
                 SlashCommand::Fork => {
                     // Save → build LLM summary → seed a fresh session
@@ -7355,6 +7486,18 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                         *store = refreshed;
                                     }
                                 }
+                                // Refresh the system prompt's skill catalogue
+                                // section so the model sees the newly-installed
+                                // skill on the very next turn (not just `/reload`).
+                                refresh_repl_system_prompt(
+                                    &mut agent,
+                                    &mut system,
+                                    &config,
+                                    &cwd,
+                                    &skill_store_handle,
+                                    &mcp_clients,
+                                    &system_addendum,
+                                );
                             }
                             Err(e) => {
                                 println!("{COLOR_YELLOW}skill install failed: {e}{COLOR_RESET}");
@@ -7811,8 +7954,22 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         if let Err(e) = ProjectConfig::set_active_kms(config.kms_active.clone()) {
                             println!("{COLOR_YELLOW}save failed: {e}{COLOR_RESET}");
                         } else {
+                            // Refresh system prompt so the newly-attached KMS
+                            // appears in the # KMS section on the next turn —
+                            // pre-fix this used to print "restart chat or start
+                            // a new turn to pick it up" because self.system was
+                            // captured at REPL startup and never refreshed.
+                            refresh_repl_system_prompt(
+                                &mut agent,
+                                &mut system,
+                                &config,
+                                &cwd,
+                                &skill_store_handle,
+                                &mcp_clients,
+                                &system_addendum,
+                            );
                             println!(
-                                "{COLOR_DIM}KMS '{name}' attached (restart chat or start a new turn to pick it up){COLOR_RESET}"
+                                "{COLOR_DIM}KMS '{name}' attached{COLOR_RESET}"
                             );
                         }
                     }
@@ -7826,8 +7983,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     {
                         println!("{COLOR_YELLOW}save failed: {e}{COLOR_RESET}");
                     } else {
+                        refresh_repl_system_prompt(
+                            &mut agent,
+                            &mut system,
+                            &config,
+                            &cwd,
+                            &skill_store_handle,
+                            &mcp_clients,
+                            &system_addendum,
+                        );
                         println!(
-                            "{COLOR_DIM}KMS '{name}' detached (restart chat or start a new turn to apply){COLOR_RESET}"
+                            "{COLOR_DIM}KMS '{name}' detached{COLOR_RESET}"
                         );
                     }
                 }
@@ -12097,6 +12263,80 @@ mod tests {
             Arc::strong_count(&approver) >= 2,
             "factory should have cloned the approver Arc, got strong_count={}",
             Arc::strong_count(&approver),
+        );
+    }
+
+    /// Regression: `refresh_repl_system_prompt` must re-append the
+    /// lead/teammate addendum after rebuilding from
+    /// `build_full_system_prompt`. Pre-fix (the v0.26.1 audit found
+    /// this), set_system replaced the entire prompt — silently
+    /// wiping the lead delegation rules in lead-mode REPL and the
+    /// agent role + team coordination rules in teammate-mode REPL
+    /// whenever the user ran any mid-session mutator
+    /// (`/mcp add`, `/skill install`, `/kms use`, `/reload-prompt`).
+    #[tokio::test]
+    async fn refresh_repl_system_prompt_preserves_addendum() {
+        use crate::providers::{EventStream, Provider, ProviderEvent, StreamRequest};
+        use async_trait::async_trait;
+        use futures::stream;
+
+        struct StubProvider;
+        #[async_trait]
+        impl Provider for StubProvider {
+            async fn stream(&self, _req: StreamRequest) -> Result<EventStream> {
+                Ok(Box::pin(stream::iter(vec![Ok::<ProviderEvent, _>(
+                    ProviderEvent::MessageStart {
+                        model: "test".into(),
+                    },
+                )])))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig::default();
+        let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+        let mut agent = Agent::new(provider, ToolRegistry::new(), &cfg.model, "INITIAL_BASE");
+        let mut system = String::from("INITIAL_BASE");
+        let addendum = "\n\n# Agent Role: TEST\nTEST_RULES\n";
+
+        // Refresh — should rebuild base from build_full_system_prompt
+        // (against the tempdir cwd, so no project state) AND append
+        // the addendum at the end.
+        super::refresh_repl_system_prompt(
+            &mut agent,
+            &mut system,
+            &cfg,
+            tmp.path(),
+            &None,
+            &[],
+            addendum,
+        );
+
+        let agent_sys = agent.system_text();
+        assert!(
+            agent_sys.ends_with(addendum),
+            "agent.system must end with addendum after refresh; got tail: {:?}",
+            &agent_sys[agent_sys.len().saturating_sub(120)..]
+        );
+        assert_eq!(
+            system, agent_sys,
+            "local `system` mirror must stay byte-identical to agent.system"
+        );
+        // Empty-addendum path: no extra bytes appended.
+        let before_len = system.len();
+        super::refresh_repl_system_prompt(
+            &mut agent,
+            &mut system,
+            &cfg,
+            tmp.path(),
+            &None,
+            &[],
+            "",
+        );
+        assert_eq!(
+            system.len(),
+            before_len - addendum.len(),
+            "empty addendum must leave just the base"
         );
     }
 
