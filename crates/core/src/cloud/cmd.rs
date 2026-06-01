@@ -365,8 +365,8 @@ async fn get_lines(
     // (via ProjectConfig::ensure_default_exists), which would make
     // a genuinely-fresh folder look non-empty. The real signal that
     // an agent already lives here is AGENTS.md or manifest.json.
-    let has_agent_content = target.join("AGENTS.md").exists()
-        || target.join("manifest.json").exists();
+    let has_agent_content =
+        target.join("AGENTS.md").exists() || target.join("manifest.json").exists();
 
     lines.push(format!("Downloading {} …", slug));
     let client = Client::new(&url, token);
