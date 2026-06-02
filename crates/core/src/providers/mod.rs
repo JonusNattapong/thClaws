@@ -212,7 +212,7 @@ impl ProviderKind {
             // MiniMax-M2 remains available. Models use the `minimax/<id>`
             // prefix; the prefix is stripped before the request reaches
             // the upstream.
-            Self::Minimax => "minimax/minimax-m3",
+            Self::Minimax => "minimax/MiniMax-M3",
             // OpenCodeGo (opencode.ai) — OpenAI-compatible hosted inference.
             // Models use the `opencode-go/<id>` prefix (e.g.
             // `opencode-go/kimi-k2.6`); the prefix is stripped before
