@@ -207,12 +207,12 @@ impl ProviderKind {
             // that yields a doubled prefix (`nvidia/nvidia/<name>`), the outer one stripped
             // by build_provider before the request. Override via NVIDIA_BASE_URL for on-prem.
             Self::Nvidia => "nvidia/nvidia/nemotron-3-super-120b-a12b",
-            // MiniMax (minimaxi.com) — Chinese AI lab, OpenAI-compatible
-            // endpoint at api.minimaxi.com/v1. MiniMax-M2 is the latest
-            // flagship reasoning model (open-weights, hosted via the same
-            // API). Models use the `minimax/<id>` prefix; the prefix is
-            // stripped before the request reaches the upstream.
-            Self::Minimax => "minimax/MiniMax-M2",
+            // MiniMax — Chinese AI lab, OpenAI-compatible endpoint at
+            // api.minimax.io/v1. MiniMax-M3 is the latest flagship model.
+            // MiniMax-M2 remains available. Models use the `minimax/<id>`
+            // prefix; the prefix is stripped before the request reaches
+            // the upstream.
+            Self::Minimax => "minimax/MiniMax-M3",
             // OpenCodeGo (opencode.ai) — OpenAI-compatible hosted inference.
             // Models use the `opencode-go/<id>` prefix (e.g.
             // `opencode-go/kimi-k2.6`); the prefix is stripped before
@@ -1390,7 +1390,7 @@ mod tests {
             Some("https://api.minimax.io/v1")
         );
         assert_eq!(ProviderKind::Minimax.name(), "minimax");
-        assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M2");
+        assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M3");
     }
 
     #[test]
