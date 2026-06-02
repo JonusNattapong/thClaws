@@ -101,11 +101,7 @@ mod tests {
             r#"{"id":"x","name":"X","version":"0.1.0","description":"d",
                 "default_shell":"manifest-shell"}"#,
         );
-        let resolved = resolve_default_shell(
-            Some("cli-shell"),
-            Some("settings-shell"),
-            tmp.path(),
-        );
+        let resolved = resolve_default_shell(Some("cli-shell"), Some("settings-shell"), tmp.path());
         assert_eq!(resolved.as_deref(), Some("cli-shell"));
     }
 

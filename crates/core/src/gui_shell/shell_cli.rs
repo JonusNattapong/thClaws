@@ -29,15 +29,13 @@ pub fn template_ids() -> Vec<&'static str> {
 /// out of the embedded bundle to `dest`. Refuses to clobber an
 /// existing non-empty folder unless `force` is set.
 pub fn shell_new(template: &str, dest: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
-    let tpl = TEMPLATES
-        .get_dir(template)
-        .ok_or_else(|| {
-            format!(
-                "unknown template '{}'. Available: {}",
-                template,
-                template_ids().join(", ")
-            )
-        })?;
+    let tpl = TEMPLATES.get_dir(template).ok_or_else(|| {
+        format!(
+            "unknown template '{}'. Available: {}",
+            template,
+            template_ids().join(", ")
+        )
+    })?;
 
     if dest.exists() {
         let has_content = fs::read_dir(dest)
@@ -51,8 +49,7 @@ pub fn shell_new(template: &str, dest: &Path, force: bool) -> Result<Vec<PathBuf
             ));
         }
     } else {
-        fs::create_dir_all(dest)
-            .map_err(|e| format!("create {}: {e}", dest.display()))?;
+        fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
     }
 
     let mut written: Vec<PathBuf> = Vec::new();
@@ -79,11 +76,9 @@ fn extract_dir(
             .unwrap_or_else(|_| Path::new(f.path().file_name().unwrap()));
         let dst = out.join(rel);
         if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
-        fs::write(&dst, f.contents())
-            .map_err(|e| format!("write {}: {e}", dst.display()))?;
+        fs::write(&dst, f.contents()).map_err(|e| format!("write {}: {e}", dst.display()))?;
         written.push(dst);
     }
     Ok(())
@@ -100,16 +95,23 @@ pub fn shell_check(path: &Path) -> Result<Vec<(Severity, String)>, String> {
     }
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-    let manifest: super::manifest::ShellManifest = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse shell.json: {e}"))?;
+    let manifest: super::manifest::ShellManifest =
+        serde_json::from_str(&raw).map_err(|e| format!("parse shell.json: {e}"))?;
 
     if manifest.id.is_empty() {
         findings.push((Severity::Error, "shell.id is empty".into()));
     }
-    if !manifest.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !manifest
+        .id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         findings.push((
             Severity::Error,
-            format!("shell.id '{}' must be lowercase letters/digits/hyphens", manifest.id),
+            format!(
+                "shell.id '{}' must be lowercase letters/digits/hyphens",
+                manifest.id
+            ),
         ));
     }
     if manifest.name.is_empty() {
@@ -134,7 +136,8 @@ pub fn shell_check(path: &Path) -> Result<Vec<(Severity, String)>, String> {
     if manifest.permissions.is_empty() {
         findings.push((
             Severity::Warning,
-            "no permissions declared — required for marketplace publish (Tier 3 enforcement)".into(),
+            "no permissions declared — required for marketplace publish (Tier 3 enforcement)"
+                .into(),
         ));
     }
     if manifest.description.is_empty() {
@@ -189,11 +192,10 @@ pub fn shell_pack(src: &Path, dest: &Path) -> Result<PathBuf, String> {
     let manifest_path = src.join("shell.json");
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-    let manifest: super::manifest::ShellManifest = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse shell.json: {e}"))?;
+    let manifest: super::manifest::ShellManifest =
+        serde_json::from_str(&raw).map_err(|e| format!("parse shell.json: {e}"))?;
     let entry = src.join(&manifest.entry);
-    let html = fs::read_to_string(&entry)
-        .map_err(|e| format!("read {}: {e}", entry.display()))?;
+    let html = fs::read_to_string(&entry).map_err(|e| format!("read {}: {e}", entry.display()))?;
 
     let mut packed = html;
     let css = src.join("style.css");

@@ -800,9 +800,10 @@ async fn main() {
             // (b) settings.json::guiShell.serveDefault, (c)
             // manifest.json::default_shell at the working directory.
             // None of those means "serve React frontend as before".
-            let settings_default = thclaws_core::config::AppConfig::load()
-                .ok()
-                .and_then(|c| c.gui_shell.and_then(|s| s.serve_default().map(str::to_string)));
+            let settings_default = thclaws_core::config::AppConfig::load().ok().and_then(|c| {
+                c.gui_shell
+                    .and_then(|s| s.serve_default().map(str::to_string))
+            });
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let resolved_shell_id = thclaws_core::gui_shell::resolve_default_shell(
                 cli.gui_shell.as_deref(),
@@ -1503,29 +1504,31 @@ fn warn_about_stale_binaries() {
 async fn run_shell_subcommand(cmd: ShellCmd) -> i32 {
     use thclaws_core::gui_shell::shell_cli;
     match cmd {
-        ShellCmd::New { template, dest, force } => {
-            match shell_cli::shell_new(&template, &dest, force) {
-                Ok(files) => {
-                    eprintln!(
-                        "\x1b[32m✓ scaffolded {} into {}\x1b[0m",
-                        template,
-                        dest.display(),
-                    );
-                    for f in files {
-                        eprintln!("  + {}", f.display());
-                    }
-                    eprintln!(
-                        "\n   next: cd {} && thclaws shell preview .",
-                        dest.display()
-                    );
-                    0
+        ShellCmd::New {
+            template,
+            dest,
+            force,
+        } => match shell_cli::shell_new(&template, &dest, force) {
+            Ok(files) => {
+                eprintln!(
+                    "\x1b[32m✓ scaffolded {} into {}\x1b[0m",
+                    template,
+                    dest.display(),
+                );
+                for f in files {
+                    eprintln!("  + {}", f.display());
                 }
-                Err(e) => {
-                    eprintln!("\x1b[31m✗ {e}\x1b[0m");
-                    1
-                }
+                eprintln!(
+                    "\n   next: cd {} && thclaws shell preview .",
+                    dest.display()
+                );
+                0
             }
-        }
+            Err(e) => {
+                eprintln!("\x1b[31m✗ {e}\x1b[0m");
+                1
+            }
+        },
         ShellCmd::Check { path } => match shell_cli::shell_check(&path) {
             Ok(findings) => {
                 let mut errors = 0;

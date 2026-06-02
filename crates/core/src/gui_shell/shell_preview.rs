@@ -32,7 +32,9 @@ struct PreviewState {
 }
 
 pub async fn run_preview(path: &Path, port: u16) -> Result<(), String> {
-    let root = path.canonicalize().map_err(|e| format!("canonicalize {}: {e}", path.display()))?;
+    let root = path
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {}: {e}", path.display()))?;
     let manifest_path = root.join("shell.json");
     if !manifest_path.exists() {
         return Err(format!("missing shell.json at {}", manifest_path.display()));
@@ -40,7 +42,8 @@ pub async fn run_preview(path: &Path, port: u16) -> Result<(), String> {
 
     let mock_path = root.join("mock.json");
     let mock: Value = if mock_path.exists() {
-        let raw = std::fs::read_to_string(&mock_path).map_err(|e| format!("read mock.json: {e}"))?;
+        let raw =
+            std::fs::read_to_string(&mock_path).map_err(|e| format!("read mock.json: {e}"))?;
         serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
     } else {
         json!({})
@@ -74,7 +77,9 @@ pub async fn run_preview(path: &Path, port: u16) -> Result<(), String> {
         "\x1b[36m[shell preview] open http://{} (hot-reload on save)\x1b[0m",
         resolved
     );
-    axum::serve(listener, app).await.map_err(|e| format!("serve: {e}"))?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
     Ok(())
 }
 
@@ -90,10 +95,10 @@ fn spawn_watcher(root: &Path, reload: broadcast::Sender<()>) -> Result<(), Strin
                 return;
             }
         };
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(&root_buf, notify_debouncer_mini::notify::RecursiveMode::Recursive)
-        {
+        if let Err(e) = debouncer.watcher().watch(
+            &root_buf,
+            notify_debouncer_mini::notify::RecursiveMode::Recursive,
+        ) {
             eprintln!("[shell preview] watch failed: {e}");
             return;
         }
