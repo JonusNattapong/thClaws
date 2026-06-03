@@ -126,6 +126,7 @@ pub async fn run(
     let script_for_thread = script.clone();
     let cache_for_thread = if cache.is_empty() { None } else { Some(cache) };
     let logger_for_thread = logger_handle.clone();
+    let cwd_for_thread = cwd.clone();
 
     let wf_started = std::time::Instant::now();
     let (result, usages, remaining): (
@@ -137,6 +138,7 @@ pub async fn run(
         crate::workflow::set_logger(Some(logger_for_thread));
         crate::workflow::set_usage_sink(true);
         crate::workflow::set_replay_cache(cache_for_thread);
+        crate::workflow::set_include_base(Some(cwd_for_thread));
         let res = (|| -> std::result::Result<String, String> {
             let mut sandbox = crate::workflow::WorkflowSandbox::new().map_err(|e| e.to_string())?;
             sandbox.run(&script_for_thread).map_err(|e| e.to_string())
@@ -147,6 +149,7 @@ pub async fn run(
         crate::workflow::set_logger(None);
         crate::workflow::set_usage_sink(false);
         crate::workflow::set_replay_cache(None);
+        crate::workflow::set_include_base(None);
         (res, usages, remaining)
     })
     .await

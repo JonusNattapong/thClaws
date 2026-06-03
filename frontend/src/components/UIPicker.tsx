@@ -17,7 +17,7 @@ export interface ShellInfo {
   permissions: string[];
 }
 
-interface ShellPickerProps {
+interface UIPickerProps {
   onSelect: (shellId: string) => void;
   /**
    * When true (the default), the picker honours `settings.json::guiShell
@@ -32,7 +32,7 @@ interface ShellPickerProps {
 
 let nextRequestId = 1;
 
-export function ShellPicker({ onSelect, honourDefault = true }: ShellPickerProps) {
+export function UIPicker({ onSelect, honourDefault = true }: UIPickerProps) {
   const [shells, setShells] = useState<ShellInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 

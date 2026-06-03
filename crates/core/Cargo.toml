@@ -106,6 +106,10 @@ calamine = "0.34"
 umya-spreadsheet = "2"
 tao = { version = "0.34", optional = true }
 wry = { version = "0.54", optional = true }
+# PTY-backed `Shell` tab — spawns $SHELL inside a pty so the GUI can
+# host a live terminal alongside the agent-rendered `Terminal` tab.
+# Optional + gui-gated; CLI / headless builds don't ship a webview.
+portable-pty = { version = "0.9", optional = true }
 # Markdown → HTML for the Files-tab preview. GFM tables, strikethrough,
 # task lists, autolinks. `unsafe_ = false` strips raw HTML (incl. scripts)
 # before we hand it to the sandboxed iframe.
@@ -187,7 +191,7 @@ fst = { version = "0.4", optional = true }
 # ~99% of users who don't own a thClaws-Cost Cardputer. Cardputer users
 # build with `--features cost_bridge`. Issue #116.
 default = []
-gui = ["dep:tao", "dep:wry", "dep:comrak", "dep:rfd", "dep:native-dialog"]
+gui = ["dep:tao", "dep:wry", "dep:comrak", "dep:rfd", "dep:native-dialog", "dep:portable-pty"]
 # Cardputer cost display bridge — REPL streams session_cost_usd to a
 # thClaws-Cost peripheral over BLE NUS; device sends reset notifications
 # back when the user hits Backspace. Opt-in (see note on `default`).

@@ -288,6 +288,14 @@ thread_local! {
     /// denied unless the target name is in `caps.kms_write`.
     static WORKFLOW_WORKER_CAPS: RefCell<Option<WorkerCaps>> = const { RefCell::new(None) };
 
+    /// Base directory that `thclaws.include` resolves relative paths
+    /// against. Captured once at workflow start (the working folder the
+    /// user launched the workflow from) so mid-run `set_current_dir`
+    /// mutations from tools can't shift the include root. `None`
+    /// outside an active workflow run — `thclaws.include` errors.
+    static WORKFLOW_INCLUDE_BASE: RefCell<Option<std::path::PathBuf>> =
+        const { RefCell::new(None) };
+
 }
 
 // Tier 3 polish: chat-tab worker progress. When set, each
@@ -477,10 +485,79 @@ fn try_replay(prompt: &str) -> Option<String> {
 
 fn register_thclaws(ctx: &mut Context) -> JsResult<()> {
     let subagent_fn = NativeFunction::from_fn_ptr(subagent);
+    let include_fn = NativeFunction::from_fn_ptr(include);
     let thclaws_obj = ObjectInitializer::new(ctx)
         .function(subagent_fn, js_string!("subagent"), 1)
+        .function(include_fn, js_string!("include"), 1)
         .build();
     ctx.register_global_property(js_string!("thclaws"), thclaws_obj, Attribute::READONLY)
+}
+
+/// Install (or clear with `None`) the base directory that
+/// `thclaws.include` resolves relative paths against. Called by the
+/// workflow runners right before / after `spawn_blocking` so the
+/// thread-local lives exactly for one run.
+pub(crate) fn set_include_base(base: Option<std::path::PathBuf>) {
+    WORKFLOW_INCLUDE_BASE.with(|c| *c.borrow_mut() = base);
+}
+
+/// Host implementation of `thclaws.include(path)` — reads a script
+/// file and evaluates it in the same Boa Context, so any top-level
+/// `globalThis.foo = …` definitions become available to the caller.
+///
+/// Path validation:
+///   - Absolute paths → rejected (must be relative).
+///   - `..` traversal that resolves outside the base → rejected.
+///   - Symlinks that resolve outside the base → rejected (via
+///     `canonicalize`, which follows them before the prefix check).
+///
+/// Returns the included script's final expression value. Lifecycle
+/// errors (no base, bad path, file missing, parse failure) bubble up
+/// as a JS exception so the calling script can `try`/`catch`.
+fn include(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let raw = match args.get_or_undefined(0).as_string() {
+        Some(s) => s.to_std_string_escaped(),
+        None => return Err(js_error("thclaws.include: requires a path string")),
+    };
+    let path = std::path::PathBuf::from(&raw);
+    if path.is_absolute() {
+        return Err(js_error(&format!(
+            "thclaws.include: absolute paths not allowed (got '{raw}')"
+        )));
+    }
+    let base = match WORKFLOW_INCLUDE_BASE.with(|c| c.borrow().clone()) {
+        Some(b) => b,
+        None => {
+            return Err(js_error(
+                "thclaws.include: no working folder bound (not inside a workflow run)",
+            ));
+        }
+    };
+    // Resolve under the captured base. canonicalize on the joined
+    // path so `..` and symlinks are followed before the prefix check,
+    // otherwise `../etc/passwd` could slip past by spelling.
+    let joined = base.join(&path);
+    let resolved = joined.canonicalize().map_err(|e| {
+        js_error(&format!(
+            "thclaws.include: can't resolve '{raw}' under {}: {e}",
+            base.display()
+        ))
+    })?;
+    let base_canonical = base.canonicalize().unwrap_or_else(|_| base.clone());
+    if !resolved.starts_with(&base_canonical) {
+        return Err(js_error(&format!(
+            "thclaws.include: '{raw}' resolves outside the working folder ({})",
+            base_canonical.display()
+        )));
+    }
+    let content = std::fs::read_to_string(&resolved).map_err(|e| {
+        js_error(&format!(
+            "thclaws.include: can't read '{}': {e}",
+            resolved.display()
+        ))
+    })?;
+    ctx.eval(boa_engine::Source::from_bytes(&content))
+        .map_err(|e| js_error(&format!("thclaws.include: '{raw}' failed: {e}")))
 }
 
 fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -489,6 +566,12 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     let schema = extract_schema(args, ctx);
     let retry = extract_retry(args, ctx);
     let caps = extract_caps(args, ctx);
+    // `agent: "name"` picks a subagent definition from
+    // `.thclaws/agents/<name>.md` — matches the model-driven Task
+    // tool's `agent` param. Forwarded into the Task tool input below;
+    // an unknown name surfaces as a worker failure (Task tool
+    // validates against AgentDefsConfig).
+    let agent_name = extract_agent_name(args, ctx);
 
     // Stage K: serve from the replay cache when this call's prompt
     // matches the next pending entry. No worker_start/worker_done
@@ -609,7 +692,10 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
 
     // Stage H retry loop. Always at least 1 attempt; up to retry.max
     // total. Sleeps between attempts according to retry.backoff.
-    let input = serde_json::json!({ "prompt": augmented_prompt });
+    let input = match &agent_name {
+        Some(name) => serde_json::json!({ "prompt": augmented_prompt, "agent": name }),
+        None => serde_json::json!({ "prompt": augmented_prompt }),
+    };
     let mut last_failure: Option<String> = None;
     let mut last_text_for_done: Option<String> = None;
     let mut parsed_json: Option<serde_json::Value> = None;
@@ -829,6 +915,25 @@ fn extract_prompt(args: &[JsValue], ctx: &mut Context) -> String {
         .and_then(|obj| obj.get(js_string!("prompt"), ctx).ok())
         .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
         .unwrap_or_else(|| "(no prompt)".to_string())
+}
+
+/// Pull `agent: "name"` from the opts object. `None` when the field is
+/// absent / empty / non-string; the Task tool then falls back to the
+/// default agent. A non-empty string is forwarded verbatim — the Task
+/// tool validates it against the loaded `AgentDefsConfig`.
+fn extract_agent_name(args: &[JsValue], ctx: &mut Context) -> Option<String> {
+    let arg = args.get_or_undefined(0).as_object()?;
+    let v = arg.get(js_string!("agent"), ctx).ok()?;
+    if v.is_undefined() || v.is_null() {
+        return None;
+    }
+    let s = v.as_string()?.to_std_string_escaped();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 #[derive(Default)]
@@ -1434,6 +1539,104 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
         .unwrap();
 
         assert_eq!(result.unwrap(), "2:a,b");
+    }
+
+    /// `thclaws.include` resolves relative paths under the captured
+    /// working folder. Three sub-cases bundled in one test:
+    ///   1. happy path — file in cwd loads + defines a global the caller reads
+    ///   2. absolute path → rejected
+    ///   3. `..` escaping the base → rejected
+    #[test]
+    fn include_resolves_under_working_folder_and_blocks_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("helpers.js"),
+            "globalThis.helperValue = 7;",
+        )
+        .unwrap();
+        set_include_base(Some(dir.path().to_path_buf()));
+
+        // Happy path.
+        let mut sb = WorkflowSandbox::new().unwrap();
+        let out = sb
+            .run(r#"thclaws.include("helpers.js"); String(globalThis.helperValue);"#)
+            .unwrap();
+        assert_eq!(out, "7");
+
+        // Absolute paths are rejected before any IO.
+        let abs = format!(
+            "thclaws.include({:?});",
+            dir.path().join("helpers.js").to_string_lossy()
+        );
+        let err = sb.run(&abs).unwrap_err().to_string();
+        assert!(
+            err.contains("absolute paths not allowed"),
+            "got: {err}"
+        );
+
+        // `..` traversal canonicalizes outside the base → rejected.
+        let err2 = sb
+            .run(r#"thclaws.include("../escape.js");"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err2.contains("resolves outside") || err2.contains("can't resolve"),
+            "got: {err2}"
+        );
+
+        set_include_base(None);
+    }
+
+    /// `thclaws.subagent({prompt, agent: "name"})` must forward the
+    /// `agent` field into the Task tool input so the parent's
+    /// AgentDefsConfig can swap in the matching .thclaws/agents/<name>.md
+    /// definition — same shape the LLM-driven Task tool already accepts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_param_forwards_to_task_tool_input() {
+        struct EchoAgentTask;
+        #[async_trait]
+        impl Tool for EchoAgentTask {
+            fn name(&self) -> &'static str {
+                "Task"
+            }
+            fn description(&self) -> &'static str {
+                "echoes the agent field"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, input: Value) -> crate::Result<String> {
+                Ok(input
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<absent>")
+                    .to_string())
+            }
+        }
+
+        let mock: Arc<dyn Tool> = Arc::new(EchoAgentTask);
+        // First call passes agent: "reviewer"; second omits it so we
+        // can assert the conditional branch in `subagent()` doesn't
+        // inject an empty value.
+        let script = r#"
+            const a = thclaws.subagent({prompt: "review", agent: "reviewer"});
+            const b = thclaws.subagent({prompt: "no agent"});
+            `${a}|${b}`
+        "#;
+        let mock_clone = mock.clone();
+        let result: std::result::Result<String, String> = tokio::task::spawn_blocking(move || {
+            set_task_tool(Some(mock_clone));
+            let res = (|| -> std::result::Result<String, String> {
+                let mut sb = WorkflowSandbox::new().map_err(|e| e.to_string())?;
+                sb.run(script).map_err(|e| e.to_string())
+            })();
+            set_task_tool(None);
+            res
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.unwrap(), "reviewer|<absent>");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

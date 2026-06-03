@@ -99,6 +99,8 @@ pub mod shell_bang;
 #[cfg(feature = "gui")]
 pub mod shell_dispatch;
 #[cfg(feature = "gui")]
+pub mod shell_pty;
+#[cfg(feature = "gui")]
 pub mod side_channel;
 pub mod skills;
 pub mod skills_state;

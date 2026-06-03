@@ -749,6 +749,12 @@ pub enum SlashCommand {
     /// its persisted script. Completed workers come from state.jsonl;
     /// only the calls past the resume point spawn fresh.
     WorkflowResume(String),
+    /// Run a pre-authored workflow script straight from disk — same
+    /// entry point as the headless `thclaws --workflow <path.js>` CLI
+    /// flag, but available mid-session. Skips the author + review
+    /// phase that `/workflow run` uses. Arg is the path to the .js
+    /// script.
+    WorkflowExec(String),
     /// dev-plan/34: thClaws.cloud catalog. URL + token live in
     /// Settings → thClaws.cloud (or `~/.config/thclaws/settings.json`).
     /// `/cloud list` → browse the catalog; `/cloud status` → show
@@ -940,8 +946,15 @@ fn parse_workflow_subcommand(args: &str) -> SlashCommand {
                 SlashCommand::WorkflowResume(rest.to_string())
             }
         }
+        "exec" | "file" | "script" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow exec <path-to-script.js>".to_string())
+            } else {
+                SlashCommand::WorkflowExec(rest.to_string())
+            }
+        }
         "" => SlashCommand::Unknown(
-            "usage: /workflow run <goal> · /workflow list · /workflow inspect <id> · /workflow resume <id> · /workflow rm <id>"
+            "usage: /workflow run <goal> · /workflow exec <path> · /workflow list · /workflow inspect <id> · /workflow resume <id> · /workflow rm <id>"
                 .to_string(),
         ),
         _ => SlashCommand::Unknown(format!(
@@ -9522,6 +9535,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         // `Handle::block_on` without nesting runtimes.
                         let task_tool = tool_registry.get(crate::subagent::TOOL_NAME);
                         let logger_for_thread = logger_handle.clone();
+                        let include_base_for_thread = cwd_for_persist.clone();
                         // Boa's JsError contains Rc<> types and isn't
                         // Send — stringify before crossing the
                         // spawn_blocking boundary. Stage I: also drain
@@ -9538,6 +9552,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             crate::workflow::set_task_tool(task_tool);
                             crate::workflow::set_logger(logger_for_thread);
                             crate::workflow::set_usage_sink(true);
+                            crate::workflow::set_include_base(include_base_for_thread);
                             let res = (|| -> std::result::Result<String, String> {
                                 let mut sandbox = crate::workflow::WorkflowSandbox::new()
                                     .map_err(|e| e.to_string())?;
@@ -9547,6 +9562,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             crate::workflow::set_task_tool(None);
                             crate::workflow::set_logger(None);
                             crate::workflow::set_usage_sink(false);
+                            crate::workflow::set_include_base(None);
                             (res, usages)
                         })
                         .await;
@@ -9866,6 +9882,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     let logger_for_thread = logger_handle.clone();
                     let cache_for_thread = Some(cache);
                     let script_for_thread = script.clone();
+                    let include_base_for_thread = Some(cwd.clone());
 
                     type WfBlockingOut = (
                         std::result::Result<String, String>,
@@ -9880,6 +9897,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         crate::workflow::set_logger(logger_for_thread);
                         crate::workflow::set_usage_sink(true);
                         crate::workflow::set_replay_cache(cache_for_thread);
+                        crate::workflow::set_include_base(include_base_for_thread);
                         let res = (|| -> std::result::Result<String, String> {
                             let mut sandbox = crate::workflow::WorkflowSandbox::new()
                                 .map_err(|e| e.to_string())?;
@@ -9891,6 +9909,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         crate::workflow::set_logger(None);
                         crate::workflow::set_usage_sink(false);
                         crate::workflow::set_replay_cache(None);
+                        crate::workflow::set_include_base(None);
                         (res, usages, remaining)
                     })
                     .await;
@@ -9941,6 +9960,35 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         Err(e) => println!(
                             "{COLOR_YELLOW}/workflow resume: worker thread panicked: {e}{COLOR_RESET}"
                         ),
+                    }
+                }
+                SlashCommand::WorkflowExec(path) => {
+                    // Mid-session equivalent of `thclaws --workflow <path>`:
+                    // skip author/review, just execute the script from disk.
+                    // Delegates to `workflow::headless::run` so the wiring
+                    // (logger, sandbox, factory) stays in one place — the
+                    // headless runner's println/eprintln land directly in
+                    // the REPL terminal, which is already the user's view.
+                    let trimmed = path.trim();
+                    if trimmed.is_empty() {
+                        println!("{COLOR_YELLOW}/workflow exec: missing path{COLOR_RESET}");
+                        continue;
+                    }
+                    let script_path = std::path::PathBuf::from(trimmed);
+                    println!(
+                        "{COLOR_DIM}/workflow exec: running {}…{COLOR_RESET}",
+                        script_path.display()
+                    );
+                    match crate::workflow::headless::run(config.clone(), script_path, None)
+                        .await
+                    {
+                        Ok(0) => {}
+                        Ok(code) => println!(
+                            "{COLOR_YELLOW}/workflow exec: exited with code {code}{COLOR_RESET}"
+                        ),
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow exec: {e}{COLOR_RESET}")
+                        }
                     }
                 }
                 SlashCommand::Unknown(what) => {

@@ -1813,6 +1813,84 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string()));
         }
 
+        // ── PTY-backed Shell tab ───────────────────────────────────
+        // Distinct from `shell_input` (agent prompt) and from
+        // `gui_shell_*` (iframe-loaded UI tab). One global session at
+        // a time; `pty_open` replaces any existing session. Output
+        // flows back as `pty_data` (base64 bytes) / `pty_exit` events
+        // emitted by the reader thread inside `shell_pty::open`.
+        #[cfg(feature = "gui")]
+        "pty_open" => {
+            let cmd = msg
+                .get("cmd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(crate::shell_pty::default_shell);
+            let args: Vec<String> = msg
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let cwd = msg
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+            let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+            let result = crate::shell_pty::open(
+                &cmd,
+                &args,
+                cwd.as_deref(),
+                cols,
+                rows,
+                ctx.dispatch.clone(),
+            );
+            let payload = match result {
+                Ok(()) => serde_json::json!({
+                    "type": "pty_open_result",
+                    "ok": true,
+                    "cmd": cmd,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "pty_open_result",
+                    "ok": false,
+                    "error": e,
+                }),
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        #[cfg(feature = "gui")]
+        "pty_input" => {
+            // Frontend ships keystrokes as base64 (xterm.js may surface
+            // bytes that aren't valid UTF-8 — Alt-key escapes, etc. —
+            // and JSON strings can't carry those losslessly).
+            use base64::Engine;
+            let data_b64 = msg.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_b64)
+                .unwrap_or_default();
+            if !bytes.is_empty() {
+                let _ = crate::shell_pty::write(&bytes);
+            }
+        }
+
+        #[cfg(feature = "gui")]
+        "pty_resize" => {
+            let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+            let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+            let _ = crate::shell_pty::resize(cols, rows);
+        }
+
+        #[cfg(feature = "gui")]
+        "pty_close" => {
+            crate::shell_pty::close();
+        }
+
         // ── AskUserQuestion modal response (M6.36 SERVE9f) ─────────
         "ask_user_response" => {
             let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);

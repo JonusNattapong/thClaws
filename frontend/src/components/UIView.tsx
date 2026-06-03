@@ -18,14 +18,14 @@ import { send, subscribe } from "../hooks/useIPC";
 //   gui_shell_event with replyTo  -> reply to a request
 //   gui_shell_event with event    -> streamed event (text|done|error)
 
-interface ShellViewProps {
+interface UIViewProps {
   active: boolean;
   shellId: string;
 }
 
 const TIER1_SESSION_ID = "tier1";
 
-export function ShellView({ active, shellId }: ShellViewProps) {
+export function UIView({ active, shellId }: UIViewProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   useEffect(() => {

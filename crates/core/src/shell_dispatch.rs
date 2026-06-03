@@ -3309,6 +3309,9 @@ pub async fn dispatch(
         SlashCommand::WorkflowResume(prefix) => {
             dispatch_workflow_resume(prefix, state, events_tx).await;
         }
+        SlashCommand::WorkflowExec(path) => {
+            dispatch_workflow_exec(path, state, events_tx).await;
+        }
         SlashCommand::WorkflowRm(_) => {
             emit(
                 events_tx,
@@ -3733,6 +3736,46 @@ async fn dispatch_workflow_resume(
     let _ = events_tx.send(ViewEvent::TurnDone);
 }
 
+/// Mid-session equivalent of `thclaws --workflow <path>`: read a
+/// pre-authored script from disk and execute it under the active
+/// session — skipping the `/workflow run` author + review phase
+/// entirely. Output streams through the chat tab via the same
+/// `run_workflow_inline` engine that powers `/workflow run` /
+/// `/workflow resume`.
+async fn dispatch_workflow_exec(
+    path: String,
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        emit(events_tx, "/workflow exec: missing path".to_string());
+        return;
+    }
+    let script_path = std::path::PathBuf::from(trimmed);
+    let script = match std::fs::read_to_string(&script_path) {
+        Ok(s) => s,
+        Err(e) => {
+            emit(
+                events_tx,
+                format!(
+                    "/workflow exec: can't read '{}': {e}",
+                    script_path.display()
+                ),
+            );
+            return;
+        }
+    };
+    emit(
+        events_tx,
+        format!("/workflow exec: running {}…", script_path.display()),
+    );
+    let label = format!("(exec {})", script_path.display());
+    run_workflow_inline(state, events_tx, &label, script, None).await;
+    // Same chat-tab streaming-flag cleanup as the other two entry points.
+    let _ = events_tx.send(ViewEvent::TurnDone);
+}
+
 /// Shared spawn_blocking + thread-locals wiring used by
 /// `dispatch_workflow_run` (fresh) and `dispatch_workflow_resume`
 /// (with cache). Streams the final result + cost summary back through
@@ -3793,6 +3836,7 @@ async fn run_workflow_inline(
     // mid-worker via `tokio::select!`. Reset after the run so the next
     // turn isn't pre-cancelled.
     let cancel_for_thread = state.cancel.clone();
+    let include_base_for_thread = cwd_for_persist.clone();
 
     type WfBlockingOut = (
         std::result::Result<String, String>,
@@ -3808,6 +3852,7 @@ async fn run_workflow_inline(
             crate::workflow::set_replay_cache(cache_for_thread);
             crate::workflow::set_events_tx(Some(events_tx_for_thread));
             crate::workflow::set_cancel(Some(cancel_for_thread));
+            crate::workflow::set_include_base(include_base_for_thread);
             let res = (|| -> std::result::Result<String, String> {
                 let mut sandbox =
                     crate::workflow::WorkflowSandbox::new().map_err(|e| e.to_string())?;
@@ -3821,6 +3866,7 @@ async fn run_workflow_inline(
             crate::workflow::set_replay_cache(None);
             crate::workflow::set_events_tx(None);
             crate::workflow::set_cancel(None);
+            crate::workflow::set_include_base(None);
             (res, usages, remaining)
         })
         .await;
