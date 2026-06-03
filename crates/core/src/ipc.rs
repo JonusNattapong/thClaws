@@ -1821,6 +1821,23 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         // emitted by the reader thread inside `shell_pty::open`.
         #[cfg(feature = "gui")]
         "pty_open" => {
+            // Opt-in gate. Without `shellTabEnabled: true` in
+            // .thclaws/settings.json we refuse to spawn — protects
+            // against a stale frontend that still has the tab cached
+            // or an external caller poking at the IPC. The frontend
+            // also filters the tab visibility based on this flag.
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.shell_tab_enabled)
+                .unwrap_or(false);
+            if !enabled {
+                let payload = serde_json::json!({
+                    "type": "pty_open_result",
+                    "ok": false,
+                    "error": "shell tab is opt-in — set `shellTabEnabled: true` in .thclaws/settings.json to enable",
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
             let cmd = msg
                 .get("cmd")
                 .and_then(|v| v.as_str())
@@ -1835,10 +1852,22 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Resolve cwd: explicit `cwd` in the payload wins, else
+            // fall back to the worker process's current_dir() — that's
+            // the workspace folder set by the StartupModal / ChangeCwd
+            // flow (`std::env::set_current_dir`). Without this fallback,
+            // portable-pty just inherits whatever cwd the binary
+            // happened to launch from, which can be the user's home or
+            // an arbitrary path. Explicit beats implicit.
             let cwd = msg
                 .get("cwd")
                 .and_then(|v| v.as_str())
-                .map(str::to_string);
+                .map(str::to_string)
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                });
             let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
             let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
             let result = crate::shell_pty::open(
@@ -1854,6 +1883,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     "type": "pty_open_result",
                     "ok": true,
                     "cmd": cmd,
+                    "cwd": cwd,
                 }),
                 Err(e) => serde_json::json!({
                     "type": "pty_open_result",
@@ -1954,6 +1984,42 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             };
             let payload = serde_json::json!({
                 "type": "team_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // Mirror of team_enabled_get/set for the PTY-backed Shell tab.
+        // Opt-in: surface the tab only when `shellTabEnabled: true`
+        // sits in .thclaws/settings.json. The pty_open handler also
+        // checks this, so a stale frontend can't sneak a spawn past
+        // the gate.
+        "shell_tab_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.shell_tab_enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "shell_tab_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "shell_tab_enabled_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.shell_tab_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "shell_tab_enabled_result",
                 "enabled": enabled,
                 "ok": ok,
                 "error": error,
@@ -2841,6 +2907,16 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let raw_path = crate::file_preview::ospath(
                 msg.get("path").and_then(|v| v.as_str()).unwrap_or("."),
             );
+            // Opt-in: when `show_hidden: true` the listing includes
+            // dot-prefixed entries (`.thclaws/`, `.claude/`, `.env`,
+            // etc.). Default off — the agent workspace has dozens of
+            // dot-paths the user doesn't usually want to see, but the
+            // few important ones (config / per-project memory / agent
+            // defs) are reachable behind this switch.
+            let show_hidden = msg
+                .get("show_hidden")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let resolved = crate::sandbox::Sandbox::check(&raw_path)
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
             if let Ok(entries) = std::fs::read_dir(&resolved) {
@@ -2848,7 +2924,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     .flatten()
                     .filter_map(|e| {
                         let name = e.file_name().to_string_lossy().into_owned();
-                        if name.starts_with('.') {
+                        if !show_hidden && name.starts_with('.') {
                             return None;
                         }
                         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);

@@ -165,7 +165,9 @@ pub fn open(
     rows: u16,
     dispatch: crate::ipc::DispatchFn,
 ) -> Result<(), String> {
-    let mut guard = slot().lock().map_err(|e| format!("pty slot poisoned: {e}"))?;
+    let mut guard = slot()
+        .lock()
+        .map_err(|e| format!("pty slot poisoned: {e}"))?;
     if let Some(mut prev) = guard.take() {
         let _ = prev.kill();
     }
@@ -173,8 +175,7 @@ pub fn open(
     let session = PtySession::spawn(cmd, args, cwd, cols, rows, move |event| match event {
         PtyEvent::Data(bytes) => {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let payload =
-                serde_json::json!({ "type": "pty_data", "data": b64 }).to_string();
+            let payload = serde_json::json!({ "type": "pty_data", "data": b64 }).to_string();
             (dispatch_for_event)(payload);
         }
         PtyEvent::Exit => {
@@ -188,7 +189,9 @@ pub fn open(
 
 /// Feed bytes into the running PTY's stdin (xterm keystrokes).
 pub fn write(data: &[u8]) -> Result<(), String> {
-    let mut guard = slot().lock().map_err(|e| format!("pty slot poisoned: {e}"))?;
+    let mut guard = slot()
+        .lock()
+        .map_err(|e| format!("pty slot poisoned: {e}"))?;
     match guard.as_mut() {
         Some(s) => s.write(data),
         None => Err("pty not open".into()),
@@ -197,7 +200,9 @@ pub fn write(data: &[u8]) -> Result<(), String> {
 
 /// Propagate a window-size change. No-op if no session is open.
 pub fn resize(cols: u16, rows: u16) -> Result<(), String> {
-    let guard = slot().lock().map_err(|e| format!("pty slot poisoned: {e}"))?;
+    let guard = slot()
+        .lock()
+        .map_err(|e| format!("pty slot poisoned: {e}"))?;
     match guard.as_ref() {
         Some(s) => s.resize(cols, rows),
         None => Err("pty not open".into()),
@@ -313,15 +318,9 @@ mod tests {
     #[test]
     fn exit_event_fires_when_child_ends() {
         let (tx, rx) = mpsc::channel();
-        let _session = PtySession::spawn(
-            "/bin/echo",
-            &["bye".to_string()],
-            None,
-            80,
-            24,
-            forward(tx),
-        )
-        .expect("spawn echo");
+        let _session =
+            PtySession::spawn("/bin/echo", &["bye".to_string()], None, 80, 24, forward(tx))
+                .expect("spawn echo");
 
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut saw_exit = false;

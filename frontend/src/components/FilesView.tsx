@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Pencil,
   Eye,
+  EyeOff,
   Save,
   X,
   FilePlus,
@@ -165,6 +166,12 @@ function injectBaseHref(html: string, filePath: string): string {
 
 export function FilesView({ active }: Props) {
   const [currentPath, setCurrentPath] = useState(".");
+  // Show dotfile entries (`.thclaws/`, `.claude/`, `.env`, etc.) in
+  // the listing. Off by default — the agent workspace usually has
+  // dozens of dot-prefixed paths the user doesn't need to see. The
+  // toggle persists for the lifetime of the tab (no localStorage —
+  // it's a transient view setting, not a preference).
+  const [showHidden, setShowHidden] = useState(false);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   // Explorer right-click context menu (null = closed).
   const [explorerMenu, setExplorerMenu] = useState<{ x: number; y: number } | null>(
@@ -265,7 +272,7 @@ export function FilesView({ active }: Props) {
         setTimeout(() => setSaveToast(null), 2500);
       }
     });
-    send({ type: "file_list", path: "." });
+    send({ type: "file_list", path: ".", show_hidden: showHidden });
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -276,12 +283,12 @@ export function FilesView({ active }: Props) {
   // preview with the fresh palette baked into its iframe HTML.
   useEffect(() => {
     if (!active) return;
-    send({ type: "file_list", path: currentPath });
+    send({ type: "file_list", path: currentPath, show_hidden: showHidden });
     if (preview && mode === "preview") {
       send({ type: "file_read", path: preview.path, mode: "preview", theme: themeMode });
     }
     const interval = setInterval(() => {
-      send({ type: "file_list", path: currentPath });
+      send({ type: "file_list", path: currentPath, show_hidden: showHidden });
       if (preview && mode === "preview") {
         send({ type: "file_read", path: preview.path, mode: "preview", theme: themeMode });
       }
@@ -290,19 +297,21 @@ export function FilesView({ active }: Props) {
   // `preview?.path` is intentional — using the full `preview` object
   // would re-run on every polling cycle (setPreview creates a new
   // reference each time), resetting the interval unnecessarily.
+  // `showHidden` triggers an immediate refresh when toggled so the
+  // listing flips without waiting for the next 2s tick.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, currentPath, preview?.path, mode, themeMode]);
+  }, [active, currentPath, preview?.path, mode, themeMode, showHidden]);
 
   const navigate = (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
-    send({ type: "file_list", path });
+    send({ type: "file_list", path, show_hidden: showHidden });
   };
 
   const goUp = () => {
     const parent = currentPath.includes("/")
       ? currentPath.substring(0, currentPath.lastIndexOf("/"))
       : ".";
-    send({ type: "file_list", path: parent || "." });
+    send({ type: "file_list", path: parent || ".", show_hidden: showHidden });
   };
 
   // Open the new file / folder modal, creating in the current directory.
@@ -336,7 +345,7 @@ export function FilesView({ active }: Props) {
       if (msg.ok) {
         setCreateKind(null);
         setCreateName("");
-        send({ type: "file_list", path: currentPath });
+        send({ type: "file_list", path: currentPath, show_hidden: showHidden });
       } else {
         setCreateError((msg.error as string) ?? "create failed");
       }
@@ -593,6 +602,18 @@ export function FilesView({ active }: Props) {
           <span className="truncate flex-1" title={currentPath}>
             {shortPath(currentPath)}
           </span>
+          <button
+            onClick={() => setShowHidden((v) => !v)}
+            className="p-0.5 rounded hover:bg-white/10 shrink-0"
+            title={
+              showHidden
+                ? "Hide dotfiles (.thclaws, .claude, .env, …)"
+                : "Show dotfiles (.thclaws, .claude, .env, …)"
+            }
+            style={{ color: showHidden ? "var(--accent)" : "var(--text-secondary)" }}
+          >
+            {showHidden ? <Eye size={12} /> : <EyeOff size={12} />}
+          </button>
           <button
             onClick={() => startCreate("file")}
             className="p-0.5 rounded hover:bg-white/10 shrink-0"

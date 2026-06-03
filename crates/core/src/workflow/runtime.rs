@@ -1549,11 +1549,7 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
     #[test]
     fn include_resolves_under_working_folder_and_blocks_escapes() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("helpers.js"),
-            "globalThis.helperValue = 7;",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("helpers.js"), "globalThis.helperValue = 7;").unwrap();
         set_include_base(Some(dir.path().to_path_buf()));
 
         // Happy path.
@@ -1569,10 +1565,7 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
             dir.path().join("helpers.js").to_string_lossy()
         );
         let err = sb.run(&abs).unwrap_err().to_string();
-        assert!(
-            err.contains("absolute paths not allowed"),
-            "got: {err}"
-        );
+        assert!(err.contains("absolute paths not allowed"), "got: {err}");
 
         // `..` traversal canonicalizes outside the base → rejected.
         let err2 = sb

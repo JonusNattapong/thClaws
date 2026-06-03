@@ -518,6 +518,14 @@ pub struct ProjectConfig {
         deserialize_with = "null_team_enabled_is_false"
     )]
     pub team_enabled: Option<bool>,
+    /// Opt-in flag for the GUI's PTY-backed `Shell` tab. Default off
+    /// because the tab gives the user an unsandboxed live shell with
+    /// no agent-side permission gating — fine for power users, easy
+    /// to footgun for someone new to the tool. Flip to `true` to
+    /// surface the tab; the agent-rendered `Terminal` tab and the
+    /// iframe-based `UI` tab are always available regardless.
+    #[serde(rename = "shellTabEnabled")]
+    pub shell_tab_enabled: Option<bool>,
     /// Print the assistant's raw text to stderr after each turn (dim, fenced
     /// block). Same effect as `THCLAWS_SHOW_RAW=1`. The env var wins if set.
     /// Useful when debugging model output / formatting issues.
@@ -633,6 +641,7 @@ impl Default for ProjectConfig {
             window_height: None,
             gui_scale: None,
             team_enabled: Some(false),
+            shell_tab_enabled: Some(false),
             show_raw_response: None,
             kms: None,
             auto_learn: None,
@@ -656,6 +665,25 @@ pub struct KmsSettings {
     /// every name in the list gets its `index.md` spliced into the
     /// system prompt.
     pub active: Vec<String>,
+}
+
+/// Parse a settings.json into ProjectConfig; on serde failure log a
+/// one-line warning to stderr (with file path + serde's column/line
+/// hint) and return None. Without this, a single trailing comma or
+/// missing brace silently defaults every opt-in feature to off and
+/// the user sees "I enabled `shellTabEnabled`/`teamEnabled`/… but
+/// nothing happened." Observed in the wild 2026-06-03.
+fn parse_or_warn(contents: &str, path: &std::path::Path) -> Option<ProjectConfig> {
+    match serde_json::from_str::<ProjectConfig>(contents) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!(
+                "[thclaws] {} parse failed: {e} — falling back to defaults. Every opt-in flag (teamEnabled, shellTabEnabled, …) will read as `false` until the file is valid JSON.",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 impl ProjectConfig {
@@ -683,13 +711,13 @@ impl ProjectConfig {
         let json_path = Self::path();
         if json_path.exists() {
             let contents = std::fs::read_to_string(&json_path).ok()?;
-            return serde_json::from_str(&contents).ok();
+            return parse_or_warn(&contents, &json_path);
         }
         // Try .claude/settings.json (Claude Code compat).
         let claude_path = std::env::current_dir().ok()?.join(".claude/settings.json");
         if claude_path.exists() {
             let contents = std::fs::read_to_string(&claude_path).ok()?;
-            return serde_json::from_str(&contents).ok();
+            return parse_or_warn(&contents, &claude_path);
         }
         None
     }
@@ -741,6 +769,7 @@ impl ProjectConfig {
   "planContextStrategy": "compact",
   "skillsListingStrategy": "full",
   "teamEnabled": false,
+  "shellTabEnabled": false,
   "showRawResponse": false,
   "allowedTools": null,
   "disallowedTools": null,

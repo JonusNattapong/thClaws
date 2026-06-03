@@ -423,6 +423,11 @@ export default function App() {
   }, []);
 
   const [teamEnabled, setTeamEnabled] = useState(false);
+  // Opt-in flag for the PTY-backed Shell tab. Default off — the tab
+  // gives the user an unsandboxed live shell with no agent-side
+  // permission gating, so it stays hidden until the project flips
+  // `shellTabEnabled: true` in .thclaws/settings.json.
+  const [shellTabEnabled, setShellTabEnabled] = useState(false);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -431,6 +436,12 @@ export default function App() {
         typeof msg.enabled === "boolean"
       ) {
         setTeamEnabled(msg.enabled as boolean);
+      } else if (
+        (msg.type === "shell_tab_enabled" ||
+          msg.type === "shell_tab_enabled_result") &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setShellTabEnabled(msg.enabled as boolean);
       } else if (
         msg.type === "initial_state" &&
         typeof msg.team_enabled === "boolean"
@@ -445,13 +456,20 @@ export default function App() {
       }
     });
     send({ type: "team_enabled_get" });
+    send({ type: "shell_tab_enabled_get" });
     return unsub;
   }, []);
 
   const modalOpen = showSettings || instructionsScope !== null || modelPicker !== null;
-  const effectiveTab = (!teamEnabled && activeTab === "team") ? "chat" as Tab : activeTab;
+  const effectiveTab =
+    !teamEnabled && activeTab === "team"
+      ? ("chat" as Tab)
+      : !shellTabEnabled && activeTab === "shell"
+        ? ("chat" as Tab)
+        : activeTab;
 
-  const TABS = teamEnabled ? ALL_TABS : ALL_TABS.filter((t) => t.id !== "team");
+  let TABS = teamEnabled ? ALL_TABS : ALL_TABS.filter((t) => t.id !== "team");
+  if (!shellTabEnabled) TABS = TABS.filter((t) => t.id !== "shell");
 
   if (!started) {
     return (
