@@ -1740,6 +1740,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_job_captures_exit_and_writes_log() {
+        // `log_dir_for` reads `$HOME` to place the log file. Concurrent
+        // tests in tools/{memory,kms} + research/* + kms.rs flip HOME
+        // to tempdirs they then drop on guard release — racing those
+        // would leave `outcome.log_path` pointing at a deleted dir.
+        let _env = crate::kms::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         // Fake binary: ignores --print + the prompt, just echoes its
         // cwd to stdout and exits 0. This proves cwd was honored.

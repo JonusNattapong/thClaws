@@ -522,6 +522,12 @@ pub async fn dispatch(
         SlashCommand::Clear => {
             state.agent.clear_history();
             state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
+            // Reset session-scoped trust + plan state too. ChangeCwd's
+            // hygiene block (shared_session.rs ~2820) is the reference;
+            // /clear used to skip these, so the previous conversation's
+            // yolo flag and plan persisted into the cleared session.
+            state.approver.reset_session_flag();
+            crate::tools::plan_state::clear();
             let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
             emit(events_tx, "(history cleared)".into());
         }
@@ -3398,39 +3404,24 @@ async fn switch_model(
         }
     }
 
-    // Intra-family swap (e.g. sonnet → opus, both Anthropic) keeps the
-    // same message/tool-call schema on the wire, so the existing
-    // conversation replays cleanly against the new model. Cross-family
-    // swaps (Anthropic → OpenAI → Gemini) change the wire shape and
-    // would either hard-error or silently corrupt context — fork to a
-    // fresh session instead.
-    let old_kind = crate::providers::ProviderKind::detect(&state.config.model);
-    let new_kind = crate::providers::ProviderKind::detect(&resolved);
-    let same_family = old_kind.is_some() && old_kind == new_kind;
-
-    // Flush prior session before swapping. We always want the on-disk
-    // copy up-to-date regardless of which branch we take next.
+    // Preserve history across every model swap, intra- or cross-family.
+    // The JSONL log is the canonical conversation; whichever provider
+    // serves the next turn translates ContentBlocks to its wire format
+    // (anthropic.rs serializes blocks directly, openai.rs maps ToolUse →
+    // tool_calls, etc.). Blocks that don't map cleanly (e.g. Anthropic
+    // Thinking on a non-reasoning OpenAI model) are silently dropped per
+    // provider — accepted tradeoff for continuity. Pre-fix, cross-family
+    // swaps forked to a fresh session because mid-conversation
+    // translation was deemed risky; user reversed that on
+    // thClaws/thClaws#142.
     save_history(&state.agent, &mut state.session, &state.session_store);
 
     state.config = candidate;
-    if same_family {
-        // Preserve history across the model swap. `rebuild_agent(true)`
-        // carries the existing message list into the fresh Agent; the
-        // session itself keeps its id and accumulated messages, we just
-        // update the `model` label so the header reflects the new model.
-        if let Err(e) = state.rebuild_agent(true) {
-            emit(events_tx, format!("rebuild failed: {e}"));
-            return;
-        }
-        state.session.model = state.config.model.clone();
-    } else {
-        if let Err(e) = state.rebuild_agent(false) {
-            emit(events_tx, format!("rebuild failed: {e}"));
-            return;
-        }
-        state.agent.clear_history();
-        state.session = Session::new(&state.config.model, state.session.cwd.clone());
+    if let Err(e) = state.rebuild_agent(true) {
+        emit(events_tx, format!("rebuild failed: {e}"));
+        return;
     }
+    state.session.model = state.config.model.clone();
 
     // Persist the model choice to project settings so a restart lands
     // on the same provider/model.
@@ -3439,15 +3430,10 @@ async fn switch_model(
     let _ = project.save();
 
     let provider = state.config.detect_provider().unwrap_or("unknown");
-    let session_note = if same_family {
-        "conversation preserved".to_string()
-    } else {
-        format!("new session {}", state.session.id)
-    };
     emit(
         events_tx,
         format!(
-            "model → {} (provider: {provider}; saved to .thclaws/settings.json; {session_note})",
+            "model → {} (provider: {provider}; saved to .thclaws/settings.json; conversation preserved)",
             state.config.model
         ),
     );
@@ -3461,6 +3447,9 @@ async fn switch_model(
     let (ctx, src) =
         crate::model_catalogue::effective_context_window_with(&cat, &state.config.model);
     if !src.is_known() {
+        // Re-derive the provider kind from the now-active model — the
+        // intra/cross-family classification we used pre-#142 is gone.
+        let new_kind = crate::providers::ProviderKind::detect(&state.config.model);
         let is_ollama = matches!(
             new_kind,
             Some(crate::providers::ProviderKind::Ollama)
@@ -3525,11 +3514,9 @@ async fn switch_model(
             );
         }
     }
-    // Only reset the view's history when we actually forked. On a same-
-    // family swap the bubbles / terminal replay stays as-is.
-    if !same_family {
-        let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
-    }
+    // Never reset the view's history on a model swap — the bubbles /
+    // terminal replay stay as-is and the next turn continues the
+    // conversation under the new provider.
     let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
         &state.session_store,
         &state.session.id,

@@ -2559,12 +2559,13 @@ mod tests {
     /// agent::tests so cwd contention is bounded; if this becomes a
     /// hot spot, we'd add a Mutex like plan_state's test_lock.
     fn with_cwd<R>(dir: &std::path::Path, f: impl FnOnce() -> R) -> R {
-        // Synchronise cwd-touching tests in this module so they don't
-        // race when cargo runs them in parallel — `set_current_dir`
-        // is process-global and the previous tests in the file don't
-        // touch cwd, so a Mutex inside agent::tests is enough.
-        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Serialise via the crate-wide env lock (kms::test_env_lock) so
+        // we don't race against kms/plugins/context/config tests that
+        // mutate the same process-global cwd/HOME. A local Mutex here
+        // wouldn't coordinate with those modules and the prompt-builder
+        // tests would intermittently read whichever cwd happened to be
+        // active when their two refresh calls fired.
+        let _g = crate::kms::test_env_lock();
         let prior = std::env::current_dir().expect("cwd readable");
         std::env::set_current_dir(dir).expect("cwd to test dir");
         let out = f();

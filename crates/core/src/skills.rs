@@ -1997,13 +1997,12 @@ mod tests {
         }
     }
 
-    /// Serializes tests in this module that mutate process-global CWD
-    /// — `set_current_dir` is a process-wide effect and parallel
-    /// `cargo test` runs would interleave otherwise. Same pattern as
-    /// `agent::tests::with_cwd`.
+    /// Serializes against the crate-wide env lock so concurrent tests
+    /// in kms/plugins/context/agent/config/repl/web that also mutate
+    /// cwd or HOME don't race with us. A module-local CWD_LOCK would
+    /// only block siblings inside this file.
     fn with_cwd<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
-        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::kms::test_env_lock();
         let prior = std::env::current_dir().expect("cwd readable");
         std::env::set_current_dir(dir).expect("cwd to test dir");
         let out = f();

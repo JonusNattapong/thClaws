@@ -2642,31 +2642,24 @@ async fn run_worker(
                     }
                 }
                 let model_changed = state.config.model != prev_model;
-                // Preserve history when only the auth changed under the
-                // same model — wire format is unchanged. Drop history
-                // when the model itself flipped, since the new
-                // provider's message schema may not replay cleanly.
-                match state.rebuild_agent(!model_changed) {
+                // Always preserve history across config reloads, including
+                // when the model itself changed. The JSONL log is the
+                // canonical conversation; each provider's stream() builds
+                // its own wire payload from ContentBlocks per turn, so
+                // mid-conversation provider swaps replay cleanly. Blocks
+                // that don't map across providers (Anthropic Thinking on a
+                // non-reasoning OpenAI model, etc.) are silently dropped
+                // per provider. See thClaws/thClaws#142 — pre-fix this
+                // path minted a fresh session on every model change.
+                match state.rebuild_agent(true) {
                     Ok(()) => {
                         state.rebuild_system_prompt();
                         if model_changed {
-                            // Mint a fresh session so its stored
-                            // `model` field matches the active
-                            // provider — same logic as ChangeCwd.
-                            state.session = crate::session::Session::new(
-                                &state.config.model,
-                                state.cwd.to_string_lossy(),
-                            );
-                            state.warned_file_size = false;
-                            if let (Some(store), Ok(mut g)) =
-                                (state.session_store.as_ref(), plan_persist_path.lock())
-                            {
-                                let path = store.path_for(&state.session.id);
-                                let _ = state.session.write_header_if_missing(&path);
-                                *g = Some(path);
-                            }
-                            crate::tools::plan_state::clear();
-                            let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
+                            // Keep the same session id + JSONL file; just
+                            // update the `model` label so the header
+                            // reflects the active provider on the next
+                            // header write.
+                            state.session.model = state.config.model.clone();
                         }
                         let provider_name = state.config.detect_provider().unwrap_or("unknown");
                         let payload = serde_json::json!({
@@ -4299,12 +4292,14 @@ mod tests {
 
     /// Serialises tests that mutate `HAL_API_KEY` so they don't race
     /// each other or any other test reading the env var in parallel.
+    // Alias for the crate-wide env lock. These tests mutate
+    // HAL_API_KEY / TAVILY_API_KEY / BRAVE_SEARCH_API_KEY, which the
+    // prompt-builder reads via `services_prompt_section()` — racing
+    // against the prompt test in repl::tests would flip the section
+    // size mid-build. The HAL bullet is ~1700 chars, which is exactly
+    // the size mismatch we saw before this was unified.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        crate::kms::test_env_lock()
     }
 
     #[test]

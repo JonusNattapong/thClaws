@@ -1404,14 +1404,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::tempdir;
 
-    /// Serializes tests that mutate process-global env vars
-    /// (`THCLAWS_PROJECT_ROOT`, `THCLAWS_CONFIG`, etc.). Without this,
-    /// cargo's default parallel runner lets one test's `remove_var`
-    /// race with another's mid-flight `read_to_string`.
-    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Env-mutating tests in this module use `crate::kms::test_env_lock`
+    // (the crate-wide lock) rather than a local one, so they don't race
+    // against tests in kms/plugins/context/agent that also flip cwd /
+    // HOME / THCLAWS_PROJECT_ROOT.
 
     #[test]
     fn default_config_is_anthropic_sonnet() {
@@ -1713,7 +1711,7 @@ mod tests {
     /// assertion fails otherwise.
     #[test]
     fn ensure_default_exists_writes_full_template_then_is_idempotent() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::kms::test_env_lock();
         let dir = tempdir().unwrap();
         std::env::set_var("THCLAWS_PROJECT_ROOT", dir.path());
 
@@ -1823,7 +1821,7 @@ mod tests {
     /// `posix_spawn` race described above.
     #[test]
     fn cli_model_override_set_get_clear() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::kms::test_env_lock();
         clear_cli_model_override();
         assert_eq!(cli_model_override(), None);
         set_cli_model_override("cli-override-model".into());

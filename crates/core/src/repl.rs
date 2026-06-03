@@ -5738,6 +5738,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     // `last_saved_count` and silently skip the first
                     // post-clear turn from disk.
                     session = Session::new(&config.model, session.cwd.clone());
+                    // Reset session-scoped trust state too — the previous
+                    // conversation's "allow for this session" yolo flag
+                    // and any persisted plan-mode state shouldn't leak
+                    // into the cleared session. Pre-fix only model-swap
+                    // reset these; plain /clear silently kept them.
+                    crate::permissions::ApprovalSink::reset_session_flag(approver.as_ref());
+                    crate::tools::plan_state::clear();
                     // ANSI: scrollback erase (\x1b[3J) + screen erase (\x1b[2J)
                     // + cursor home (\x1b[H). Matches what most terminals do
                     // for Cmd+K / `clear`. Makes the visible scrollback match
@@ -5808,14 +5815,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         // implement listing.
                         _ => {}
                     }
-                    // Flush any pending messages in the outgoing session
-                    // before we swap providers. Mid-turn history built
-                    // against provider A's message/tool schema can't always
-                    // be re-fed to provider B — keep the old turns in their
-                    // own file and start provider B with a clean slate, like
-                    // a fresh app launch with the new model.
+                    // Snapshot the existing conversation BEFORE rebuilding the
+                    // agent — we feed it back into the new agent so the user
+                    // stays in the same chat thread across the provider swap.
+                    // The JSONL log is the canonical history; whichever
+                    // provider serves the next turn translates ContentBlocks
+                    // to its own wire format (anthropic.rs serializes blocks
+                    // directly; openai.rs maps ToolUse → tool_calls; etc.).
+                    // Provider-specific blocks that don't map (e.g. Anthropic
+                    // Thinking on a non-reasoning OpenAI model) are silently
+                    // dropped per-provider — accepted tradeoff for the
+                    // continuity. See thClaws/thClaws#142.
+                    let history = agent.history_snapshot();
                     if let Some(store) = &session_store {
-                        session.sync(agent.history_snapshot());
+                        session.sync(history.clone());
                         if !session.messages.is_empty() {
                             if let Err(e) = store.save(&mut session) {
                                 println!(
@@ -5836,16 +5849,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     .with_permission_mode(perm_mode)
                     .with_approver(approver.clone())
                     .with_hooks(std::sync::Arc::new(config.hooks.clone()));
-                    agent.clear_history();
-                    session = Session::new(&config.model, session.cwd.clone());
-                    // M6.20 BUG M2 + M3: model swap mints a fresh
-                    // session; reset yolo flag and permission mode.
-                    crate::permissions::ApprovalSink::reset_session_flag(approver.as_ref());
-                    let _ = crate::permissions::take_pre_plan_mode();
-                    crate::permissions::set_current_mode_and_broadcast(perm_mode);
+                    agent.set_history(history);
+                    // Keep the same session id + JSONL file; just update the
+                    // model label so the header reflects the active provider.
+                    session.model = config.model.clone();
                     save_project_model(&config.model);
                     println!(
-                        "{COLOR_DIM}model → {} (saved to .thclaws/settings.json; new session {}){COLOR_RESET}",
+                        "{COLOR_DIM}model → {} (saved to .thclaws/settings.json; conversation preserved in session {}){COLOR_RESET}",
                         config.model, session.id
                     );
                 }
@@ -12232,14 +12242,13 @@ mod tests {
         assert_eq!(parse_slash("/memory list"), Some(SlashCommand::MemoryList));
     }
 
-    // Env-var tests live in a single serialized block because they mutate
-    // process-wide state and would race under cargo test's parallel runner.
-    // Holds a Mutex that serializes access across all env-var-touching tests.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Env-var tests use the crate-wide env lock (`kms::test_env_lock`)
+    // so they serialise against every other env-mutating test in the
+    // crate, not just siblings inside this module.
 
     #[test]
     fn build_provider_honors_env_keys() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::kms::test_env_lock();
 
         let saved_a = std::env::var("ANTHROPIC_API_KEY").ok();
         let saved_o = std::env::var("OPENAI_API_KEY").ok();
@@ -12282,7 +12291,7 @@ mod tests {
     /// Trace: https://github.com/thClaws/thClaws (screenshot in Thai)
     #[test]
     fn empty_env_var_treated_as_unset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::kms::test_env_lock();
 
         let saved_a = std::env::var("ANTHROPIC_API_KEY").ok();
         let saved_g = std::env::var("GEMINI_API_KEY").ok();
@@ -12399,6 +12408,15 @@ mod tests {
     /// (`/mcp add`, `/skill install`, `/kms use`, `/reload-prompt`).
     #[tokio::test]
     async fn refresh_repl_system_prompt_preserves_addendum() {
+        // `build_full_system_prompt` reads `current_dir()` (via
+        // `MemoryStore::default_path`) and `$HOME` (via `home_dir`).
+        // Take the crate-wide env lock so we don't race against
+        // sibling tests in kms/plugins/context/agent/config that flip
+        // cwd / HOME — without it, the two refresh calls in this test
+        // can read different project / memory snapshots and the
+        // empty-addendum length assertion intermittently fails.
+        let _env_lock = crate::kms::test_env_lock();
+
         use crate::providers::{EventStream, Provider, ProviderEvent, StreamRequest};
         use async_trait::async_trait;
         use futures::stream;
