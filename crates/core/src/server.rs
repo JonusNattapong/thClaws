@@ -45,7 +45,9 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
 /// The same single-file React build the desktop GUI embeds. Re-embedded
@@ -159,6 +161,15 @@ struct ServeState {
     /// session from this registry instead of using `shared`.
     /// `None` = single-tenant (use `shared`).
     multi_tenant: Option<MultiTenantState>,
+    /// Count of active browser WS connections. Incremented on
+    /// `handle_socket` entry, decremented on exit (via `WsGuard`).
+    /// Read by the optional `cloud_heartbeat` task to decide whether
+    /// to ping `last_active_at` on the thclaws.cloud control plane —
+    /// see `spawn_cloud_heartbeat` for the full path. Zero connections
+    /// means "no browser tab is currently watching this engine"; the
+    /// cloud reaper is then free to pause the workspace after its
+    /// idle-timeout window.
+    ws_connections: Arc<AtomicUsize>,
 }
 
 /// State derived from [`MultiTenantMode`] at server bootstrap. Held
@@ -326,6 +337,7 @@ pub async fn run_with_engine(
             hmac_secret: Arc::new(cfg.hmac_secret.clone()),
         }
     });
+    let ws_connections = Arc::new(AtomicUsize::new(0));
     let state = ServeState {
         shared,
         approver,
@@ -333,7 +345,16 @@ pub async fn run_with_engine(
         ask_broadcast,
         workspace: Arc::new(workspace),
         multi_tenant: multi_tenant_state,
+        ws_connections: ws_connections.clone(),
     };
+
+    // Cloud heartbeat: when running inside a thclaws.cloud workspace
+    // pod, periodically POST to `/api/hosted/workspaces/<id>/keepalive`
+    // while at least one browser tab is connected. The provisioner
+    // injects THCLAWS_CLOUD_URL / THCLAWS_CLOUD_TOKEN / THCLAWS_WORKSPACE_ID
+    // at provision time. Outside cloud (any env var missing), this is
+    // a no-op — local CLI / desktop GUI runs don't need it.
+    spawn_cloud_heartbeat(ws_connections);
 
     // Loopback-only safety check for the API auth-bypass token. The
     // bypass mode (`THCLAWS_API_TOKEN=disable-auth`) makes the OpenAI
@@ -535,6 +556,91 @@ fn build_shell_router(
 
 fn is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
+}
+
+/// RAII guard that increments the WS-connection counter on
+/// construction and decrements on drop. Used inside `handle_socket`
+/// so the counter is panic-safe — any early return / unwind still
+/// releases the count, which the cloud heartbeat task observes on its
+/// next tick.
+struct WsGuard(Arc<AtomicUsize>);
+
+impl WsGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for WsGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Spawn a background task that pings the thclaws.cloud control plane
+/// every 60s while at least one WS connection is active. Used as the
+/// activity signal for the cloud's idle reaper: a workspace pod that
+/// nobody is watching stops pinging, `last_active_at` ages out, the
+/// reaper scales the pod to 0.
+///
+/// Requires three env vars from the provisioner:
+///   - `THCLAWS_CLOUD_URL`     — e.g. `https://thclaws.cloud`
+///   - `THCLAWS_CLOUD_TOKEN`   — CliToken minted at provision time
+///   - `THCLAWS_WORKSPACE_ID`  — UUID of this workspace
+///
+/// Any missing var = local / non-cloud run; the task no-ops and
+/// returns immediately so we don't burn a tokio worker on idle.
+fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
+    let url = match std::env::var("THCLAWS_CLOUD_URL") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+    let token = match std::env::var("THCLAWS_CLOUD_TOKEN") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+    let workspace_id = match std::env::var("THCLAWS_WORKSPACE_ID") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+    let endpoint = format!(
+        "{}/api/hosted/workspaces/{}/keepalive",
+        url.trim_end_matches('/'),
+        workspace_id
+    );
+    eprintln!("\x1b[36m[serve] cloud heartbeat → {endpoint} (every 60s while WS connected)\x1b[0m");
+    tokio::spawn(async move {
+        // Re-using the global stream client would pull in stream
+        // timeout knobs we don't want; build a small dedicated one.
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[serve] heartbeat client build failed: {e}");
+                return;
+            }
+        };
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            if connections.load(Ordering::SeqCst) == 0 {
+                continue;
+            }
+            match client.post(&endpoint).bearer_auth(&token).send().await {
+                Ok(r) if r.status().is_success() => {}
+                Ok(r) => {
+                    eprintln!("[serve] heartbeat {endpoint} returned HTTP {}", r.status());
+                }
+                Err(e) => {
+                    eprintln!("[serve] heartbeat {endpoint} failed: {e}");
+                }
+            }
+        }
+    });
 }
 
 async fn serve_index() -> impl IntoResponse {
@@ -814,6 +920,12 @@ fn resolve_session_handle(
 /// only) so the IpcContext + handle_ipc plumbing can be smoke-tested
 /// before the rendering layer is wired.
 async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedSessionHandle>) {
+    // Tick the cloud-heartbeat counter for the lifetime of this socket.
+    // `_ws_guard` decrements on drop so panics / early returns can't
+    // leak a stale count. The cloud heartbeat task reads this to
+    // decide whether to ping keepalive on every 60s tick.
+    let _ws_guard = WsGuard::new(state.ws_connections.clone());
+
     let (mut sink, mut stream) = socket.split();
     // Outbound channel: every dispatch closure invocation lands here;
     // a single task drains it to the sink so concurrent dispatches
@@ -1304,6 +1416,7 @@ mod tests {
             ask_broadcast,
             workspace: std::sync::Arc::new(std::env::temp_dir()),
             multi_tenant,
+            ws_connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
