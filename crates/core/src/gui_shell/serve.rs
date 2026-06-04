@@ -268,9 +268,8 @@ pub fn serve_shell_index_inline(shell: &ShellRef) -> Response<Body> {
 pub fn inject_inline_bridge_with_id(html: &[u8], shell_id: &str) -> Vec<u8> {
     let bridge = super::BRIDGE_RUNTIME;
     let id_json = serde_json::to_string(shell_id).unwrap_or_else(|_| "\"\"".into());
-    let injection = format!(
-        "<script>window.__thclaws_shell_id={id_json};</script><script>{bridge}</script>"
-    );
+    let injection =
+        format!("<script>window.__thclaws_shell_id={id_json};</script><script>{bridge}</script>");
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = find_subslice(&lower, b"<head>") {
         let insert_at = idx + b"<head>".len();

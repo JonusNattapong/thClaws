@@ -86,7 +86,9 @@ async fn drain_a_few(mut stream: thclaws_core::providers::EventStream) -> Result
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn live_openrouter_free_model_works() {
-    let Some(key) = std::env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty())
+    let Some(key) = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
     else {
         eprintln!("SKIP: OPENROUTER_API_KEY not set");
         return;
@@ -109,7 +111,9 @@ async fn live_openrouter_free_model_works() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn live_openrouter_paid_model_works() {
-    let Some(key) = std::env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty())
+    let Some(key) = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
     else {
         eprintln!("SKIP: OPENROUTER_API_KEY not set");
         return;
@@ -136,7 +140,9 @@ async fn live_openrouter_paid_model_works() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn live_openrouter_wrapped_quote_key_reproduces_issue_145() {
-    let Some(key) = std::env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty())
+    let Some(key) = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
     else {
         eprintln!("SKIP: OPENROUTER_API_KEY not set");
         return;
@@ -163,7 +169,9 @@ async fn live_openrouter_wrapped_quote_key_reproduces_issue_145() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn live_anthropic_works() {
-    let Some(key) = std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
+    let Some(key) = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
     else {
         eprintln!("SKIP: ANTHROPIC_API_KEY not set");
         return;
@@ -183,7 +191,9 @@ async fn live_anthropic_works() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn live_openai_works() {
-    let Some(key) = std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty())
+    let Some(key) = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
     else {
         eprintln!("SKIP: OPENAI_API_KEY not set");
         return;

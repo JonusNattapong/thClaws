@@ -1292,7 +1292,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 c.gui_shell
                     .and_then(|s| s.tab_default().map(str::to_string))
             });
-            let initial_tab = if tab_default.is_some() { Some("ui") } else { None };
+            let initial_tab = if tab_default.is_some() {
+                Some("ui")
+            } else {
+                None
+            };
             let payload = serde_json::json!({
                 "type": "current_cwd",
                 "path": cwd,
@@ -3376,7 +3380,8 @@ mod tests {
         let on_send_initial_state: SendInitialStateFn = Arc::new(|| {});
         let on_zoom: ZoomFn = Arc::new(|_scale: f64| {});
 
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3411,7 +3416,8 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3447,7 +3453,8 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3480,7 +3487,8 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3521,7 +3529,8 @@ mod tests {
 
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3574,7 +3583,8 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3607,7 +3617,8 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3642,7 +3653,8 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3682,7 +3694,8 @@ mod tests {
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = captured.clone();
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,
@@ -3718,7 +3731,8 @@ mod tests {
         let shared = Arc::new(crate::shared_session::spawn());
         let (approver, _rx) = crate::permissions::GuiApprover::new();
         let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
-        let ctx = IpcContext { is_serve_mode: false,
+        let ctx = IpcContext {
+            is_serve_mode: false,
             shared,
             approver,
             pending_asks,

@@ -521,8 +521,7 @@ fn split_unified_manifest(
         obj.insert("agent".to_string(), agent_block);
     }
     if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     std::fs::write(
         &settings_path,

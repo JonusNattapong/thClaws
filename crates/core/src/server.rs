@@ -388,7 +388,10 @@ pub async fn run_with_engine(
             .route("/upload", post(serve_upload))
             .route("/gui-shell/{shell_id}", get(serve_gui_shell_index))
             .route("/gui-shell/{shell_id}/", get(serve_gui_shell_index))
-            .route("/gui-shell/{shell_id}/index.html", get(serve_gui_shell_index))
+            .route(
+                "/gui-shell/{shell_id}/index.html",
+                get(serve_gui_shell_index),
+            )
             .route("/gui-shell/{shell_id}/{*rest}", get(serve_gui_shell_asset))
             .with_state(state)
             .merge(crate::api_v1::router())

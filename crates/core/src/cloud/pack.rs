@@ -111,8 +111,7 @@ pub fn pack(folder: &Path, manifest_override: Option<&[u8]>) -> Result<PackResul
         // else (guiShell, model, etc.) is user-facing config and
         // stays.
         if rel == std::path::Path::new(".thclaws/settings.json") {
-            let raw = std::fs::read(path)
-                .map_err(|e| format!("read settings.json: {e}"))?;
+            let raw = std::fs::read(path).map_err(|e| format!("read settings.json: {e}"))?;
             let cleaned = strip_publisher_fields(&raw)?;
             let mut header = tar::Header::new_gnu();
             header.set_size(cleaned.len() as u64);

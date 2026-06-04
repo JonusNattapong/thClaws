@@ -1471,7 +1471,11 @@ impl AppConfig {
         // surface the friendlier "no API key found" rather than 401.
         crate::secrets::get(kind.name()).and_then(|raw| {
             let s = sanitize_api_key(&raw);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         })
     }
 }
