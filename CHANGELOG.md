@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-06-04
+
+Live-sync fix for the KMS browser sidebar.
+
+### Fixed
+
+- **KMS browser sidebar refetches pages on `kms_update` broadcast.** The
+  sidebar now refreshes its page list when KMS updates are broadcast,
+  keeping the view synchronized with the current state.
+
 ## [0.33.0] — 2026-06-04
 
 Cloud GUI-shell-over-HTTP plus a wave of agent/auth/catalogue hardening.
