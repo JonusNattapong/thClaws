@@ -831,11 +831,6 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
     #[cfg(not(windows))]
     let start_url = "thclaws://localhost/";
 
-    // Tier 1 GUI Shell registry — embedded built-ins only. Built once,
-    // cloned into the protocol-handler closure. Cheap (compile-time data),
-    // so no Arc needed; just an owned struct moved into the closure.
-    let shell_registry = crate::gui_shell::ShellRegistry::new();
-
     let builder = WebViewBuilder::new()
         .with_url(start_url)
         .with_custom_protocol("thclaws".into(), move |_webview_id, request| {
@@ -856,12 +851,17 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     .expect("build bridge-runtime response");
             }
 
-            // GUI Shell asset route — `/gui-shell/<id>/<rel>`. Resolves
-            // <id> via the registry, looks up <rel> in the shell's asset
-            // map. HTML responses get the bridge `<script>` injected at
-            // <head> start so shell authors don't ship the bridge.
+            // GUI Shell asset route — `/gui-shell/<id>/<rel>`. Rebuild
+            // the registry per request so newly-installed agents and
+            // workspace cwd switches are picked up live (matches the
+            // fresh-scan the `gui_shell_list` IPC does — without this
+            // the picker would list a project shell that the protocol
+            // handler 404s, producing a blank iframe). Each shell load
+            // triggers a handful of asset requests, so the per-request
+            // FS scan stays well under the human-perceptible threshold.
             if let Some(rest) = req_path.strip_prefix("/gui-shell/") {
-                return serve_gui_shell_asset(&shell_registry, rest);
+                let registry = crate::gui_shell::ShellRegistry::new();
+                return serve_gui_shell_asset(&registry, rest);
             }
 
             if let Some(rest) = req_path.strip_prefix("/file-asset/") {
