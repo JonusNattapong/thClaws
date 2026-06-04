@@ -591,10 +591,18 @@ impl Drop for WsGuard {
 }
 
 /// Spawn a background task that pings the thclaws.cloud control plane
-/// every 60s while at least one WS connection is active. Used as the
-/// activity signal for the cloud's idle reaper: a workspace pod that
-/// nobody is watching stops pinging, `last_active_at` ages out, the
-/// reaper scales the pod to 0.
+/// every 60s while either (a) at least one WS connection is active OR
+/// (b) the engine has an in-flight agent turn. Used as the activity
+/// signal for the cloud's idle reaper: a workspace pod that nobody is
+/// watching AND has no work to do stops pinging, `last_active_at`
+/// ages out, the reaper scales the pod to 0.
+///
+/// Pre-fix this only checked WS connections, so closing the browser
+/// during a long batch (50-subject image gen takes ~7 min — past the
+/// 30-min reaper window if the user steps away) eventually killed
+/// the pod mid-loop. The "busy" half of the condition keeps the pod
+/// alive while there's actual work in flight, regardless of who's
+/// watching.
 ///
 /// Requires three env vars from the provisioner:
 ///   - `THCLAWS_CLOUD_URL`     — e.g. `https://thclaws.cloud`
@@ -621,7 +629,9 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
         url.trim_end_matches('/'),
         workspace_id
     );
-    eprintln!("\x1b[36m[serve] cloud heartbeat → {endpoint} (every 60s while WS connected)\x1b[0m");
+    eprintln!(
+        "\x1b[36m[serve] cloud heartbeat → {endpoint} (every 60s while WS connected or agent busy)\x1b[0m"
+    );
     tokio::spawn(async move {
         // Re-using the global stream client would pull in stream
         // timeout knobs we don't want; build a small dedicated one.
@@ -639,7 +649,9 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            if connections.load(Ordering::SeqCst) == 0 {
+            let connected = connections.load(Ordering::SeqCst) > 0;
+            let busy = crate::agent_activity::is_agent_busy();
+            if !connected && !busy {
                 continue;
             }
             match client.post(&endpoint).bearer_auth(&token).send().await {

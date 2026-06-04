@@ -5,6 +5,11 @@
 //! Higher layers (providers, tools, context, agent, repl) land in later phases.
 
 pub mod agent;
+/// Process-wide agent-busy counter — RAII guard wrapping every
+/// `drive_turn_stream` so cross-cutting concerns (the cloud heartbeat,
+/// future "is anything running" UI) can ask "is the engine doing
+/// work right now?" without threading state through every call path.
+pub mod agent_activity;
 pub mod agent_defs;
 /// Workspace-scoped agent runtime builder. Used by the HTTP
 /// `/agent/run` endpoint to construct a per-request `Agent` parameterized

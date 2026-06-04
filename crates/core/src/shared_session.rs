@@ -3767,6 +3767,12 @@ async fn drive_turn_stream(
     lead_mb: &crate::team::Mailbox,
     input_tx: &mpsc::Sender<ShellInput>,
 ) {
+    // Process-wide busy counter — the cloud heartbeat (server.rs) uses
+    // this so a closed-browser batch keeps pinging `/keepalive` and the
+    // cloud reaper doesn't pause the pod mid-turn. RAII drop covers
+    // every return path below (cancel, end-of-stream, panic unwind).
+    let _busy = crate::agent_activity::BusyGuard::new();
+
     // Phase B2: reset the empty-turn flag at the start of every turn.
     // Flipped to true on the first ToolCallStart below; if the model
     // produces zero tool calls during this turn, the next /loop /goal
