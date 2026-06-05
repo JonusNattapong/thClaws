@@ -374,6 +374,15 @@ export default function App() {
         if (Array.isArray(msg.sessions)) setKnownSessions(msg.sessions);
       }
     });
+    // useIPC opens the WS at module-load and fires frontend_ready in
+    // ws.onopen — both events can complete BEFORE this useEffect
+    // runs (App may re-render mid-flow via StartupModal). If the
+    // initial_state was already dispatched, our subscribe missed it
+    // and `knownSessions` stays empty forever. Re-fire frontend_ready
+    // here so the engine sends a fresh snapshot AFTER our subscribe
+    // is in place. The engine's handler is idempotent — just rebuilds
+    // the same snapshot from the current SessionStore.
+    send({ type: "frontend_ready" });
     return unsub;
   }, []);
   const autoLoadedRef = useRef(false);
