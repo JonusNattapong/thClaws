@@ -891,6 +891,20 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                                 "woff2" => "font/woff2",
                                 "ttf" => "font/ttf",
                                 "otf" => "font/otf",
+                                // Audio
+                                "mp3" => "audio/mpeg",
+                                "wav" => "audio/wav",
+                                "m4a" | "aac" => "audio/mp4",
+                                "ogg" | "oga" => "audio/ogg",
+                                "opus" => "audio/opus",
+                                "flac" => "audio/flac",
+                                "weba" => "audio/webm",
+                                // Video
+                                "mp4" | "m4v" => "video/mp4",
+                                "webm" => "video/webm",
+                                "mov" => "video/quicktime",
+                                "mkv" => "video/x-matroska",
+                                "ogv" => "video/ogg",
                                 _ => "application/octet-stream",
                             };
                             return Response::builder()

@@ -1083,10 +1083,14 @@ function CloudSection() {
         </span>
       </div>
       <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
-        Catalog of folder-shaped AI agents.
-        <span className="font-mono"> thclaws cloud {"{login,publish,get,list}"}</span>
-        {" "}talks to this URL; mint your CLI token from the dashboard at
-        <span className="font-mono"> {(cfg.url ?? cfg.default_url) + "/dashboard"}</span>.
+        Catalog of folder-shaped AI agents. Mint a CLI token from the
+        dashboard at
+        <span className="font-mono"> {(cfg.url ?? cfg.default_url) + "/dashboard"}</span>{" "}
+        and paste it below — every cloud action
+        (<span className="font-mono">/cloud get</span>,{" "}
+        <span className="font-mono">/cloud publish</span>,{" "}
+        <span className="font-mono">/cloud list</span>) uses it via the
+        Authorization header, no shell-env round-trip.
       </p>
 
       <FieldLabel

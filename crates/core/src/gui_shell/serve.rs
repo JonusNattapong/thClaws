@@ -144,7 +144,27 @@ pub fn serve_project_asset(workspace: &std::path::Path, rel: &str) -> Response<B
         Ok(s) => s.into_owned(),
         Err(_) => rel.to_string(),
     };
-    let resolved = match crate::sandbox::Sandbox::check_in(workspace, &decoded) {
+    // Two callers produce two URL shapes:
+    //   gui-shells (image-batch, video-studio, speech-studio) build
+    //     workspace-relative paths like `images/<slug>/<file>.png` —
+    //     join with cwd → /workspace/images/...
+    //   FilesView's assetUrl builds ABSOLUTE paths like
+    //     /workspace/speech/<file>.wav — axum's Path extractor strips
+    //     the leading `/`, so without the absolute-first attempt we'd
+    //     re-join with cwd and look for /workspace/workspace/... → 404.
+    // Try absolute first (re-add the slash the route capture peeled off);
+    // fall back to workspace-relative. `check_in` enforces sandbox
+    // containment for both — security unchanged.
+    let resolved = {
+        let abs_candidate = if decoded.starts_with('/') {
+            decoded.clone()
+        } else {
+            format!("/{decoded}")
+        };
+        crate::sandbox::Sandbox::check_in(workspace, &abs_candidate)
+            .or_else(|_| crate::sandbox::Sandbox::check_in(workspace, &decoded))
+    };
+    let resolved = match resolved {
         Ok(p) => p,
         Err(_) => {
             return Response::builder()
@@ -195,6 +215,20 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
         "ttf" => "font/ttf",
         "otf" => "font/otf",
         "txt" | "md" => "text/plain; charset=utf-8",
+        // Audio
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" | "aac" => "audio/mp4",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "flac" => "audio/flac",
+        "weba" => "audio/webm",
+        // Video
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "ogv" => "video/ogg",
         _ => "application/octet-stream",
     }
 }

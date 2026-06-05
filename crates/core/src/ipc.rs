@@ -3071,6 +3071,17 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         || ext == "ods";
                     let is_pptx = ext == "pptx";
                     let is_office = is_docx || is_xlsx || is_pptx;
+                    // Audio + video are streamed via the file-asset
+                    // route, NOT base64-inlined here — a 50 MB MP4
+                    // round-tripped through IPC + base64 would dwarf
+                    // the actual playback. Frontend keys off `mime`
+                    // and renders <audio>/<video> with assetUrl().
+                    let is_audio = matches!(
+                        ext.as_str(),
+                        "mp3" | "wav" | "m4a" | "ogg" | "oga" | "opus" | "flac" | "aac" | "weba"
+                    );
+                    let is_video =
+                        matches!(ext.as_str(), "mp4" | "m4v" | "webm" | "mov" | "mkv" | "ogv");
                     let mime = match ext.as_str() {
                         "png" => "image/png",
                         "jpg" | "jpeg" => "image/jpeg",
@@ -3080,6 +3091,18 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "ico" => "image/x-icon",
                         "bmp" => "image/bmp",
                         "pdf" => "application/pdf",
+                        "mp3" => "audio/mpeg",
+                        "wav" => "audio/wav",
+                        "m4a" | "aac" => "audio/mp4",
+                        "ogg" | "oga" => "audio/ogg",
+                        "opus" => "audio/opus",
+                        "flac" => "audio/flac",
+                        "weba" => "audio/webm",
+                        "mp4" | "m4v" => "video/mp4",
+                        "webm" => "video/webm",
+                        "mov" => "video/quicktime",
+                        "mkv" => "video/x-matroska",
+                        "ogv" => "video/ogg",
                         "md" | "markdown" => {
                             if source_mode {
                                 "text/markdown"
@@ -3091,7 +3114,18 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "docx" | "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" | "pptx" => "text/html",
                         _ => "text/plain",
                     };
-                    if is_image || is_pdf {
+                    if is_audio || is_video {
+                        // No content payload — frontend mounts the
+                        // file-asset URL into <audio>/<video> directly.
+                        let payload = serde_json::json!({
+                            "type": "file_content",
+                            "path": raw_path,
+                            "content": "",
+                            "mime": mime,
+                            "mode": mode,
+                        });
+                        (ctx.dispatch)(payload.to_string());
+                    } else if is_image || is_pdf {
                         if let Ok(bytes) = std::fs::read(&path) {
                             let b64 = crate::file_preview::encode_bytes_b64(&bytes);
                             let payload = serde_json::json!({

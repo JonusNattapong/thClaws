@@ -292,14 +292,18 @@ enum Command {
         #[command(subcommand)]
         cmd: MessengerCmd,
     },
-    /// thClaws.cloud catalog client (dev-plan/34) — browse, publish, and
-    /// install folder-shaped AI Agents.
-    ///
-    /// An "AI Agent" in thClaws is a working folder (AGENTS.md +
-    /// ./.thclaws/ + workspace files). These subcommands let you tar
-    /// such a folder and publish it to the catalog (`publish`), pull a
-    /// catalog folder onto your machine (`get`), browse what you've
-    /// purchased/published (`list`), or sign in (`login`).
+    /// thClaws.cloud catalog client (dev-plan/34) — RETIRED FROM THE
+    /// SHELL. Every cloud operation now happens inside a thclaws
+    /// session as a slash command, so the catalog token never
+    /// passes through shell argv, env, or terminal history. Every
+    /// subcommand below prints the corresponding /cloud … or GUI
+    /// pointer and exits non-zero:
+    ///   login/logout → Settings → thClaws.cloud panel in the GUI
+    ///   status       → /cloud status
+    ///   list         → /cloud list [--mine]
+    ///   get          → /cloud get <slug>
+    ///   publish      → /cloud publish
+    ///   unbind       → /cloud unbind
     Cloud {
         #[command(subcommand)]
         cmd: CloudCmd,
@@ -366,17 +370,21 @@ enum ShellCmd {
 
 #[derive(Subcommand)]
 enum CloudCmd {
-    /// Sign in by pasting a CLI token from the web dashboard.
-    /// (Go to /dashboard → "Mint CLI token" → copy → paste here.)
+    /// REMOVED — open thclaws and paste your CLI token in
+    /// Settings → thClaws.cloud. The shell subcommand exits with a
+    /// pointer so the token never has to pass through shell argv.
     Login {
         /// Provide the token inline instead of prompting.
         #[arg(long)]
         token: Option<String>,
     },
-    /// Forget the cached CLI token.
+    /// REMOVED — open thclaws and clear the CLI token in
+    /// Settings → thClaws.cloud.
     Logout,
-    /// Tar the agent folder (default: cwd), strip secrets/sessions,
-    /// upload to the catalog as a new version.
+    /// REMOVED — use `/cloud publish` from inside a thclaws session.
+    /// The shell subcommand printed (and now refuses with a pointer
+    /// to the slash flow) so the catalog token doesn't have to live
+    /// in shell env / terminal history.
     Publish {
         /// Path to the agent folder. Defaults to cwd.
         #[arg(default_value = ".")]
@@ -385,7 +393,10 @@ enum CloudCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Download an agent from the catalog and extract into a target dir.
+    /// REMOVED — use `/cloud get <slug>` from inside a thclaws session.
+    /// The shell subcommand refuses with a pointer to the slash flow
+    /// so the catalog token doesn't have to live in shell env /
+    /// terminal history.
     Get {
         /// Catalog slug (`manifest.id`).
         slug: String,
@@ -400,18 +411,15 @@ enum CloudCmd {
         #[arg(long)]
         force: bool,
     },
-    /// List agents from the catalog. With --mine, lists agents you
-    /// have published.
+    /// REMOVED — use `/cloud list [--mine]` from inside a thclaws session.
     List {
         #[arg(long)]
         mine: bool,
     },
-    /// Print the resolved catalog URL + whether a CLI token is stored.
-    /// Mirrors what the GUI Settings → Cloud panel shows.
+    /// REMOVED — use `/cloud status` from inside a thclaws session.
     Status,
-    /// Clear `./.thclaws/settings.json::agent.uuid` so the next publish
-    /// from this folder creates a fresh catalog entry instead of
-    /// updating the bound one. Use when forking a downloaded agent.
+    /// REMOVED — use `/cloud unbind` from inside a thclaws session in
+    /// the agent folder you want to fork.
     Unbind,
 }
 
@@ -1081,44 +1089,75 @@ fn run_messenger_subcommand(cmd: MessengerCmd) -> i32 {
     }
 }
 
-async fn run_cloud_subcommand(cmd: CloudCmd, cloud_url: Option<String>) -> i32 {
-    use thclaws_core::cloud::cmd as cloud_cmd;
-
-    let cloud_cfg = thclaws_core::config::ProjectConfig::load().and_then(|c| c.cloud.clone());
-    let url_override = cloud_url.as_deref();
-
-    let result = match cmd {
-        CloudCmd::Login { token } => {
-            cloud_cmd::login(url_override, token, cloud_cfg.as_ref()).await
-        }
-        CloudCmd::Logout => cloud_cmd::logout(),
-        CloudCmd::Publish { path, dry_run } => {
-            cloud_cmd::publish(path, url_override, dry_run, cloud_cfg.as_ref()).await
-        }
-        CloudCmd::Get {
-            slug,
-            target,
-            version,
-            force,
-        } => {
-            let target_path = if target.is_empty() {
-                std::path::PathBuf::from(&slug)
+async fn run_cloud_subcommand(cmd: CloudCmd, _cloud_url: Option<String>) -> i32 {
+    // Every `thclaws cloud …` subcommand now redirects to the
+    // in-session slash equivalent (or the GUI Settings panel for
+    // login/logout). The clap subcommand structure stays so users
+    // who paste an old command get the targeted "use /cloud X"
+    // message rather than "unknown subcommand". No more catalog
+    // network calls from the shell — that's the whole point.
+    let result: Result<(), String> = match cmd {
+        // login + logout moved to the GUI Settings → thClaws.cloud
+        // panel (and the equivalent IPC `cloud_config_set` for
+        // headless). Same reason as publish/get below: no token
+        // through shell argv or env.
+        CloudCmd::Login { .. } => Err("`thclaws cloud login` was removed. Open thclaws, go to \
+                 Settings → thClaws.cloud, paste your CLI token from the \
+                 dashboard (https://thclaws.cloud/dashboard). The token \
+                 is stored in the OS keychain and used via the \
+                 Authorization header — never through shell argv."
+            .to_string()),
+        CloudCmd::Logout => Err("`thclaws cloud logout` was removed. Open thclaws, go to \
+                 Settings → thClaws.cloud, click the clear button next to \
+                 the CLI token field."
+            .to_string()),
+        // Publish + Get were moved into the in-session slash surface so
+        // the catalog token never has to be threaded through a shell
+        // env (which made it leak into terminal histories, dotenv
+        // tooling, and stray `ps` output). Both subcommands now refuse
+        // to run and tell the user the new flow.
+        CloudCmd::Publish { .. } => Err(
+            "`thclaws cloud publish` was removed. From inside a thclaws \
+                 session in the agent folder, run:\n  \
+                     /cloud publish\n\
+                 The slash command uses the session's stored token via the \
+                 Authorization header — no shell-env leak."
+                .to_string(),
+        ),
+        CloudCmd::Get { slug, .. } => {
+            let slug_display = if slug.is_empty() {
+                "<slug>".to_string()
             } else {
-                std::path::PathBuf::from(target)
+                slug
             };
-            cloud_cmd::get(
-                slug,
-                target_path,
-                version,
-                force,
-                url_override,
-                cloud_cfg.as_ref(),
-            )
-            .await
+            Err(format!(
+                "`thclaws cloud get` was removed. From inside a thclaws session \
+                 in the folder you want to install into, run:\n  \
+                     /cloud get {slug_display}\n\
+                 The slash command uses the session's stored token via the \
+                 Authorization header — no shell-env leak."
+            ))
         }
-        CloudCmd::List { mine } => cloud_cmd::list(mine, url_override, cloud_cfg.as_ref()).await,
-        CloudCmd::Status => cloud_cmd::status(url_override, cloud_cfg.as_ref()),
-        CloudCmd::Unbind => cloud_cmd::unbind(),
+        // status / list / unbind also moved to /cloud … slash for
+        // consistency — every cloud op now happens inside a thclaws
+        // session, so there's exactly one surface to teach.
+        CloudCmd::List { .. } => Err(
+            "`thclaws cloud list` was removed. From inside a thclaws session, run:\n  \
+                     /cloud list           (full catalog)\n  \
+                     /cloud list --mine    (just yours)"
+                .to_string(),
+        ),
+        CloudCmd::Status => Err(
+            "`thclaws cloud status` was removed. From inside a thclaws session, run:\n  \
+                     /cloud status"
+                .to_string(),
+        ),
+        CloudCmd::Unbind => Err(
+            "`thclaws cloud unbind` was removed. From inside a thclaws session in the \
+                 agent folder you want to fork, run:\n  \
+                     /cloud unbind"
+                .to_string(),
+        ),
     };
 
     match result {

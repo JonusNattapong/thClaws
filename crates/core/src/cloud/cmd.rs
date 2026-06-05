@@ -132,11 +132,47 @@ pub async fn list_lines(
     }
 }
 
+/// `/cloud publish` from inside a session — packs cwd + uploads.
+/// Returns ordered progress lines (including any error). Mirrors
+/// [`get_into_cwd_lines`].
+pub async fn publish_cwd_lines(
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+) -> Vec<String> {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => return vec![format!("/cloud publish: can't read cwd: {e}")],
+    };
+    let mut lines: Vec<String> = Vec::new();
+    if let Err(e) = publish_inner(cwd, cloud_url, false, cloud_cfg, &mut lines).await {
+        lines.push(format!("/cloud publish: {e}"));
+    }
+    lines
+}
+
 pub async fn publish(
     path: PathBuf,
     cloud_url: Option<&str>,
     dry_run: bool,
     cloud_cfg: Option<&CloudConfig>,
+) -> Result<(), String> {
+    // CLI-facing thin wrapper: mirror the slash-friendly inner impl
+    // and dump its lines to stderr so terminal output matches the old
+    // eprintln shape exactly.
+    let mut lines = Vec::new();
+    let result = publish_inner(path, cloud_url, dry_run, cloud_cfg, &mut lines).await;
+    for ln in &lines {
+        eprintln!("{ln}");
+    }
+    result
+}
+
+async fn publish_inner(
+    path: PathBuf,
+    cloud_url: Option<&str>,
+    dry_run: bool,
+    cloud_cfg: Option<&CloudConfig>,
+    log: &mut Vec<String>,
 ) -> Result<(), String> {
     let url = resolve_cloud_url(cloud_url, cloud_cfg);
     let token = crate::cloud::token();
@@ -158,22 +194,22 @@ pub async fn publish(
     let fused_json =
         serde_json::to_vec_pretty(&fused).map_err(|e| format!("serialize fused manifest: {e}"))?;
 
-    eprintln!("Packing {} …", path.display());
+    log.push(format!("Packing {} …", path.display()));
     let result = pack::pack(&path, Some(&fused_json))?;
-    eprintln!(
+    log.push(format!(
         "  Included {} file(s), stripped {} file(s), {:.1} KB",
         result.included.len(),
         result.stripped.len(),
         result.bytes.len() as f64 / 1024.0
-    );
+    ));
     if !result.stripped.is_empty() {
-        eprintln!("  Stripped (showing first 10):");
+        log.push("  Stripped (showing first 10):".to_string());
         for s in result.stripped.iter().take(10) {
-            eprintln!("    - {}", s);
+            log.push(format!("    - {}", s));
         }
     }
     if agent.uuid.is_some() {
-        eprintln!(
+        log.push(format!(
             "  Publishing as existing agent (uuid: {}…)",
             &agent
                 .uuid
@@ -182,27 +218,29 @@ pub async fn publish(
                 .chars()
                 .take(8)
                 .collect::<String>()
-        );
+        ));
     } else {
-        eprintln!("  First publish — server will assign a UUID.");
+        log.push("  First publish — server will assign a UUID.".to_string());
     }
     if dry_run {
-        eprintln!("Dry run — not uploading.");
+        log.push("Dry run — not uploading.".to_string());
         return Ok(());
     }
 
     if token.is_none() {
-        return Err("not logged in — run `thclaws cloud login`".into());
+        return Err(
+            "not logged in — paste your CLI token in Settings → thClaws.cloud (mint one at /dashboard)".into()
+        );
     }
 
-    eprintln!("Uploading to {} …", url);
+    log.push(format!("Uploading to {} …", url));
     let client = Client::new(&url, token);
     let resp = client.publish(result.bytes).await?;
-    eprintln!(
+    log.push(format!(
         "✓ Published {} v{} ({} bytes)",
         resp.slug, resp.version, resp.size_bytes
-    );
-    eprintln!("  {}", resp.url);
+    ));
+    log.push(format!("  {}", resp.url));
 
     // Write the assigned UUID back to settings.json so re-publish from
     // this folder targets the same catalog entry.
@@ -214,10 +252,10 @@ pub async fn publish(
         project
             .save()
             .map_err(|e| format!("write settings.json: {e}"))?;
-        eprintln!(
+        log.push(format!(
             "  settings.json::agent.uuid updated → {}…",
             resp.uuid.chars().take(8).collect::<String>()
-        );
+        ));
     }
     Ok(())
 }
@@ -288,6 +326,15 @@ fn scopeguard_chdir(prior: Option<PathBuf>) -> impl Drop {
 }
 
 pub fn unbind() -> Result<(), String> {
+    for ln in unbind_lines() {
+        eprintln!("{ln}");
+    }
+    Ok(())
+}
+
+/// `/cloud unbind` from inside a session. Same logic as [`unbind`]
+/// but returns lines for the SlashOutput stream instead of eprintln.
+pub fn unbind_lines() -> Vec<String> {
     let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
     let prior = project
         .agent
@@ -295,18 +342,16 @@ pub fn unbind() -> Result<(), String> {
         .and_then(|a| a.uuid.clone())
         .unwrap_or_default();
     if prior.is_empty() {
-        eprintln!("Already unbound (no settings.json::agent.uuid).");
-        return Ok(());
+        return vec!["Already unbound (no settings.json::agent.uuid).".to_string()];
     }
     project.clear_agent_uuid();
-    project
-        .save()
-        .map_err(|e| format!("write settings.json: {e}"))?;
-    eprintln!(
-        "✓ Cleared agent UUID ({}…). Next `cloud publish` will create a new catalog entry.",
+    if let Err(e) = project.save() {
+        return vec![format!("/cloud unbind: write settings.json: {e}")];
+    }
+    vec![format!(
+        "✓ Cleared agent UUID ({}…). Next /cloud publish will create a new catalog entry.",
         prior.chars().take(8).collect::<String>()
-    );
-    Ok(())
+    )]
 }
 
 pub async fn get(
@@ -356,7 +401,10 @@ async fn get_lines(
     let url = resolve_cloud_url(cloud_url, cloud_cfg);
     let token = crate::cloud::token();
     if token.is_none() {
-        return vec!["/cloud get: not logged in — run `thclaws cloud login`".to_string()];
+        return vec![
+            "/cloud get: not logged in — paste your CLI token in Settings → thClaws.cloud (mint one at /dashboard)"
+                .to_string(),
+        ];
     }
 
     let mut lines = Vec::new();
@@ -418,21 +466,19 @@ async fn get_lines(
                 lines.push(format!(
                     "/cloud get: refusing to overwrite. This folder is bound to agent {}…, but \
                      the downloaded agent is {}…. To replace this folder with the downloaded \
-                     agent, run `thclaws cloud unbind` first OR cd to an empty directory.",
+                     agent, run /cloud unbind first OR cd to an empty directory.",
                     local.chars().take(8).collect::<String>(),
                     server_uuid.chars().take(8).collect::<String>()
                 ));
                 return lines;
             }
             None => {
-                lines.push(format!(
+                lines.push(
                     "/cloud get: refusing to overwrite. This folder has agent content \
                      (AGENTS.md / manifest.json) but no bound UUID in .thclaws/settings.json. \
-                     Either cd to an empty directory, or pass --force on the CLI \
-                     (`thclaws cloud get {} {} --force`).",
-                    slug,
-                    target.display()
-                ));
+                     Cd to an empty directory and run /cloud get again."
+                        .into(),
+                );
                 return lines;
             }
         }

@@ -138,6 +138,20 @@ function isMarkdownPath(path: string): boolean {
   );
 }
 
+// In cloud, every workspace is mounted under `/u/<user>/<ws>/` by
+// Traefik (see infra/k3s/runner/ingressroute.yaml.j2) and the
+// strip-prefix middleware peels that off before forwarding to the
+// runner pod. The pod's --serve also registers the file-asset route
+// PREFIXED with the same path so the Host()+PathPrefix() rule
+// matches. `window.location.origin` is just scheme+host — no path —
+// so `${origin}/file-asset/...` would skip the prefix entirely and
+// 404 at Traefik. Walk the prefix out of `location.pathname` instead.
+// Desktop / single-tenant `--serve` have no prefix; match returns "".
+function workspacePrefix(): string {
+  const m = location.pathname.match(/^(\/u\/[^/]+\/[^/]+)/);
+  return m ? m[1] : "";
+}
+
 // Build a same-origin URL for the custom protocol's file-asset handler.
 // Keeping path separators unencoded lets the browser treat the URL as
 // a directory structure, so relative references inside the HTML (e.g.
@@ -146,7 +160,7 @@ function assetUrl(absPath: string): string {
   const normalized = absPath.replace(/\\/g, "/");
   const segments = normalized.split("/").map(encodeURIComponent).join("/");
   const leadingSlash = segments.startsWith("/") ? "" : "/";
-  return `${window.location.origin}/file-asset${leadingSlash}${segments}`;
+  return `${window.location.origin}${workspacePrefix()}/file-asset${leadingSlash}${segments}`;
 }
 
 // Inject a <base href> pointing at the markdown file's parent directory
@@ -161,7 +175,7 @@ function injectBaseHref(html: string, filePath: string): string {
   const dir = lastSlash >= 0 ? normalized.slice(0, lastSlash) : "";
   const segments = dir.split("/").map(encodeURIComponent).join("/");
   const leadingSlash = segments.startsWith("/") ? "" : "/";
-  const baseHref = `${window.location.origin}/file-asset${leadingSlash}${segments}/`;
+  const baseHref = `${window.location.origin}${workspacePrefix()}/file-asset${leadingSlash}${segments}/`;
   return html.replace(/<head>/i, `<head><base href="${baseHref}">`);
 }
 
@@ -622,6 +636,8 @@ export function FilesView({ active }: Props) {
   const isHtml = preview?.mime === "text/html";
   const isImage = preview?.mime.startsWith("image/");
   const isPdf = preview?.mime === "application/pdf";
+  const isAudio = !!preview?.mime.startsWith("audio/");
+  const isVideo = !!preview?.mime.startsWith("video/");
   const canEdit = preview && isTextEditable(preview.path);
   const hasSyntaxPreview =
     preview && SYNTAX_PREVIEW.has(extOf(preview.path));
@@ -879,6 +895,37 @@ export function FilesView({ active }: Props) {
                 style={{ borderColor: "var(--border)", background: "#fff" }}
                 title={preview.path}
               />
+            ) : isAudio ? (
+              // Audio + video stream off /file-asset/, not a base64
+              // data URI — keeps a 50 MB clip from round-tripping
+              // through IPC. `key` forces a fresh element when the
+              // selected file changes so the player resets cleanly.
+              <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4 p-6">
+                <audio
+                  key={`audio-${preview.path}`}
+                  src={assetUrl(preview.path)}
+                  controls
+                  preload="metadata"
+                  className="w-full max-w-2xl"
+                />
+                <div
+                  className="text-xs font-mono"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  {preview.path.split("/").pop()} · {preview.mime}
+                </div>
+              </div>
+            ) : isVideo ? (
+              <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center p-2">
+                <video
+                  key={`video-${preview.path}`}
+                  src={assetUrl(preview.path)}
+                  controls
+                  preload="metadata"
+                  className="max-w-full max-h-full rounded"
+                  style={{ background: "#000" }}
+                />
+              </div>
             ) : isHtml ? (
               isMarkdownPath(preview.path) ? (
                 // Markdown preview: backend renders MD → HTML and

@@ -3291,6 +3291,10 @@ pub async fn dispatch(
                     CloudSlash::Get { slug } => {
                         crate::cloud::cmd::get_into_cwd_lines(slug, None, cloud_cfg.as_ref()).await
                     }
+                    CloudSlash::Publish => {
+                        crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await
+                    }
+                    CloudSlash::Unbind => crate::cloud::cmd::unbind_lines(),
                 };
                 for line in lines {
                     let _ = events_tx_clone.send(ViewEvent::SlashOutput(line));

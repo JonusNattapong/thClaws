@@ -25,7 +25,7 @@ impl Client {
         let t = self
             .token
             .as_deref()
-            .ok_or("not logged in — run `thclaws cloud login`")?;
+            .ok_or("not logged in — paste your CLI token in Settings → thClaws.cloud (mint one at /dashboard)")?;
         Ok(format!("Bearer {}", t))
     }
 

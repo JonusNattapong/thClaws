@@ -774,6 +774,17 @@ pub enum CloudSlash {
     /// → safe overwrite. Non-empty cwd + mismatching/missing UUID →
     /// abort. CLI `--force` bypass not exposed at the slash surface.
     Get { slug: String },
+    /// `/cloud publish` — tar cwd, upload to the catalog as a new
+    /// version. Inside-session-only path (the standalone CLI
+    /// `thclaws cloud publish` subcommand exits with a pointer here);
+    /// the token comes from the session's settings.json/keychain so
+    /// it isn't required on the shell-command line.
+    Publish,
+    /// `/cloud unbind` — clear settings.json::agent.uuid in cwd so
+    /// the next `/cloud publish` registers a new catalog entry
+    /// instead of trying to update someone else's. Used when forking
+    /// an agent you `/cloud get`'d from another publisher.
+    Unbind,
 }
 
 /// Subcommands of `/sso`. `/sso` with no arg defaults to `Status`.
@@ -1763,8 +1774,12 @@ fn parse_cloud_subcommand(args: &str) -> SlashCommand {
                 SlashCommand::Cloud(CloudSlash::Get { slug })
             }
         }
+        "publish" => SlashCommand::Cloud(CloudSlash::Publish),
+        "unbind" => SlashCommand::Cloud(CloudSlash::Unbind),
         other => SlashCommand::Unknown(format!(
-            "unknown cloud subcommand: '{other}' (try: /cloud list, /cloud get <slug>, /cloud status)"
+            "unknown cloud subcommand: '{other}' \
+             (try: /cloud status, /cloud list [--mine], /cloud get <slug>, \
+             /cloud publish, /cloud unbind)"
         )),
     }
 }
@@ -3538,14 +3553,21 @@ pub fn render_help() -> &'static str {
      \x20                   Runs the built-in translator subagent in the\n  \
      \x20                   background. Override its model via settings.json\n  \
      \x20                   `translator_subagent_model`.\n  \
+     /cloud status        Show the configured catalog URL + whether a\n  \
+     \x20                   CLI token is stored.\n  \
      /cloud list [--mine] Browse thClaws.cloud catalog (dev-plan/34).\n  \
      /cloud get <slug>    Install or update an agent into the current\n  \
      \x20                   folder. Empty folder → fresh install.\n  \
      \x20                   Matching UUID → safe update. Mismatched\n  \
      \x20                   UUID or no agent block → abort.\n  \
-     /cloud status        Show the configured catalog URL + whether a\n  \
-     \x20                   CLI token is stored. Configure both via\n  \
-     \x20                   Settings → thClaws.cloud or `cloud login`.\n\n  \
+     /cloud publish       Tar the current folder + upload to the catalog\n  \
+     \x20                   as a new version.\n  \
+     /cloud unbind        Clear settings.json::agent.uuid in cwd so the\n  \
+     \x20                   next /cloud publish creates a fresh entry.\n  \
+     \x20                   Use after /cloud get'ing someone else's agent\n  \
+     \x20                   if you want to fork it.\n  \
+     \x20                   (Configure URL + token via Settings →\n  \
+     \x20                   thClaws.cloud; mint tokens at /dashboard.)\n\n  \
      ! <command>       Run a shell command directly (e.g. ! git status)"
 }
 
@@ -9408,6 +9430,21 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             )
                             .await
                             {
+                                println!("{line}");
+                            }
+                        }
+                        CloudSlash::Publish => {
+                            for line in crate::cloud::cmd::publish_cwd_lines(
+                                None,
+                                cloud_cfg.as_ref(),
+                            )
+                            .await
+                            {
+                                println!("{line}");
+                            }
+                        }
+                        CloudSlash::Unbind => {
+                            for line in crate::cloud::cmd::unbind_lines() {
                                 println!("{line}");
                             }
                         }

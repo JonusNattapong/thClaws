@@ -763,9 +763,7 @@ async fn serve_gui_shell_asset(
 /// `Sandbox::check_in`-validated against the current cwd so a
 /// crafted `../etc/passwd` can't escape. Single-tenant per --serve
 /// process; multi-tenant adds HMAC in `build_shell_router`.
-async fn serve_file_asset(
-    axum::extract::Path(rel): axum::extract::Path<String>,
-) -> Response {
+async fn serve_file_asset(axum::extract::Path(rel): axum::extract::Path<String>) -> Response {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     crate::gui_shell::serve::serve_project_asset(&cwd, &rel)
 }
