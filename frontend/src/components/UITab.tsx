@@ -15,9 +15,14 @@ import { UIView } from "./UIView";
 
 interface UITabProps {
   active: boolean;
+  /** When the workspace tab bar is hidden (full-screen UI mode), we
+   * also hide the in-tab "‹ shells / <id>" breadcrumb. Otherwise a
+   * stray click on "shells" jumps back to the picker mid-workflow —
+   * easy to do by accident when the shell takes the full viewport. */
+  fullscreen?: boolean;
 }
 
-export function UITab({ active }: UITabProps) {
+export function UITab({ active, fullscreen = false }: UITabProps) {
   const [selected, setSelected] = useState<string | null>(null);
   // Once the user has gone back to the picker (via the breadcrumb),
   // we want the grid even if settings.json::guiShell.tabDefault is set
@@ -35,29 +40,31 @@ export function UITab({ active }: UITabProps) {
 
   return (
     <div className="w-full h-full flex flex-col">
-      <div
-        className="flex items-center gap-2 px-3 py-1.5 text-xs border-b"
-        style={{
-          background: "var(--bg-secondary)",
-          borderColor: "var(--border)",
-          color: "var(--text-secondary)",
-        }}
-      >
-        <button
-          onClick={() => {
-            setSkipDefault(true);
-            setSelected(null);
+      {!fullscreen && (
+        <div
+          className="flex items-center gap-2 px-3 py-1.5 text-xs border-b"
+          style={{
+            background: "var(--bg-secondary)",
+            borderColor: "var(--border)",
+            color: "var(--text-secondary)",
           }}
-          className="flex items-center gap-1 hover:underline"
-          title="Return to shell picker"
         >
-          <ArrowLeft size={12} /> shells
-        </button>
-        <span style={{ color: "var(--text-secondary)" }}>/</span>
-        <span className="font-mono" style={{ color: "var(--text-primary)" }}>
-          {selected}
-        </span>
-      </div>
+          <button
+            onClick={() => {
+              setSkipDefault(true);
+              setSelected(null);
+            }}
+            className="flex items-center gap-1 hover:underline"
+            title="Return to shell picker"
+          >
+            <ArrowLeft size={12} /> shells
+          </button>
+          <span style={{ color: "var(--text-secondary)" }}>/</span>
+          <span className="font-mono" style={{ color: "var(--text-primary)" }}>
+            {selected}
+          </span>
+        </div>
+      )}
       <div className="flex-1 min-h-0">
         <UIView active={active} shellId={selected} />
       </div>

@@ -752,7 +752,7 @@ export default function App() {
                 {id === "chat" && <ChatView active={isActive} modalOpen={modalOpen} />}
                 {id === "files" && <FilesView active={isActive} />}
                 {id === "team" && <TeamView />}
-                {id === "ui" && <UITab active={isActive} />}
+                {id === "ui" && <UITab active={isActive} fullscreen={fullscreen} />}
                 {id === "shell" && <ShellTab active={isActive} />}
               </div>
             );
