@@ -1567,15 +1567,24 @@ mod tests {
     }
 
     #[test]
-    fn needs_venv_detects_pip_and_python_tools() {
+    fn needs_venv_detects_pip_and_server_tools() {
+        // v0.35.4 tightened needs_venv: only pip/poetry/uv installs +
+        // long-running server runners + pytest. Plain `python script.py`
+        // does NOT trigger venv auto-wrap (was producing spurious
+        // `[creating .venv]` warnings around agent-shipped stdlib
+        // scripts; the agent then mis-attributed them to the script).
         assert!(needs_venv("pip install fastapi"));
         assert!(needs_venv("pip3 install uvicorn"));
         assert!(needs_venv("uvicorn main:app --port 8000"));
         assert!(needs_venv("gunicorn app:app"));
         assert!(needs_venv("pytest tests/"));
         assert!(needs_venv("flask run"));
-        assert!(needs_venv("python app.py"));
-        assert!(needs_venv("python3 main.py"));
+        assert!(needs_venv("poetry install"));
+        assert!(needs_venv("uv pip install requests"));
+        // Plain python invocations — explicitly NOT venv-wrapped.
+        assert!(!needs_venv("python app.py"));
+        assert!(!needs_venv("python3 main.py"));
+        assert!(!needs_venv("python3 .thclaws/scripts/batch.py"));
         assert!(!needs_venv("echo hello"));
         assert!(!needs_venv("cargo build"));
         assert!(!needs_venv("npm install express"));

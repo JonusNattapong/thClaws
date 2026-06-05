@@ -2102,7 +2102,10 @@ mod tests {
         assert_eq!(fires.len(), 3);
         assert!(fires.windows(2).all(|pair| pair[0] < pair[1]));
         for fire in fires {
-            assert_eq!(fire.with_timezone(&Local).format("%H:%M").to_string(), "09:00");
+            assert_eq!(
+                fire.with_timezone(&Local).format("%H:%M").to_string(),
+                "09:00"
+            );
         }
     }
 
@@ -2125,7 +2128,10 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let next = compute_next_fire("30 8 * * *", after).unwrap();
-        assert_eq!(next.with_timezone(&Local).format("%H:%M").to_string(), "08:30");
+        assert_eq!(
+            next.with_timezone(&Local).format("%H:%M").to_string(),
+            "08:30"
+        );
     }
 
     #[test]
@@ -2180,7 +2186,10 @@ mod tests {
     fn display_last_run_formats_local_time_and_preserves_instant() {
         let displayed = display_last_run(Some("2026-05-06T12:34:56Z"));
         let parsed = DateTime::parse_from_rfc3339(&displayed).unwrap();
-        assert_eq!(parsed.with_timezone(&Utc).to_rfc3339(), "2026-05-06T12:34:56+00:00");
+        assert_eq!(
+            parsed.with_timezone(&Utc).to_rfc3339(),
+            "2026-05-06T12:34:56+00:00"
+        );
     }
 
     #[test]
