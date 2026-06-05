@@ -393,6 +393,15 @@ pub async fn run_with_engine(
                 get(serve_gui_shell_index),
             )
             .route("/gui-shell/{shell_id}/{*rest}", get(serve_gui_shell_asset))
+            // Workspace file passthrough — GUI shells can render
+            // agent-produced files (image-batch's images/<slug>/*.png,
+            // generated PDFs, contact-sheet HTML) via direct
+            // <img src="/file-asset/images/foo/bar.png"> tags. The
+            // server-side check is `Sandbox::check_in(cwd, rel)` so
+            // paths can't escape the workspace. Single-tenant per
+            // pod, so no cross-user concern (multi-tenant adds the
+            // HMAC layer in build_shell_router).
+            .route("/file-asset/{*rel}", get(serve_file_asset))
             .with_state(state)
             .merge(crate::api_v1::router())
     };
@@ -745,6 +754,20 @@ async fn serve_gui_shell_asset(
         }
     };
     crate::gui_shell::serve::serve_shell_asset(&shell, &rel)
+}
+
+/// `GET /file-asset/<rel>` — serve a workspace-relative file so GUI
+/// shells can render agent-produced output (image-batch's
+/// `images/<slug>/*.png`, generated PDFs, contact-sheet HTML, etc.)
+/// via plain `<img src>` / `<a href>` tags. Path is
+/// `Sandbox::check_in`-validated against the current cwd so a
+/// crafted `../etc/passwd` can't escape. Single-tenant per --serve
+/// process; multi-tenant adds HMAC in `build_shell_router`.
+async fn serve_file_asset(
+    axum::extract::Path(rel): axum::extract::Path<String>,
+) -> Response {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    crate::gui_shell::serve::serve_project_asset(&cwd, &rel)
 }
 
 /// `POST /upload` — multipart file upload from the --serve browser
