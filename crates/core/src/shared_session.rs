@@ -19,7 +19,8 @@ use crate::session::{Session, SessionStore};
 use crate::tools::ToolRegistry;
 use crate::types::{ContentBlock, Message, Role};
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -3871,7 +3872,74 @@ static PROGRESS_LINE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock
         .expect("PROGRESS_LINE_RE compiles")
 });
 
+/// Pull a human-readable `&str` out of a `Box<dyn Any + Send>` panic
+/// payload. Falls back to a generic string for non-string payloads.
+/// Used by `drive_turn_stream`'s `catch_unwind` arm so the user sees
+/// why the turn died (and the lead-log records it for the post-mortem).
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "internal error: agent turn panicked".to_string()
+    }
+}
+
+/// Public turn driver — wraps `drive_turn_stream_inner` in
+/// `catch_unwind` so a panic mid-stream still flushes the session
+/// (otherwise `save_history` in the `Done` arm never runs and the
+/// in-progress turn — sometimes the whole session — disappears on
+/// restart, per issue #148).
+///
+/// On panic: log the cause, surface it to the user, flush the session
+/// JSONL, refresh the sidebar, clear the busy spinner, release the lead
+/// agent, then re-raise so the process is still free to unwind cleanly.
+/// The inner helper's RAII guards (`_busy`, `_broadcast_on_drop`) drop
+/// normally on the unwind path — `catch_unwind` returns normally from
+/// the future's perspective.
 async fn drive_turn_stream(
+    stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<AgentEvent, crate::error::Error>> + Send>,
+    >,
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+    cancel: &crate::cancel::CancelToken,
+    lead_mb: &crate::team::Mailbox,
+    input_tx: &mpsc::Sender<ShellInput>,
+    surface_session: Option<String>,
+) {
+    let turn_result = AssertUnwindSafe(drive_turn_stream_inner(
+        stream,
+        state,
+        events_tx,
+        cancel,
+        lead_mb,
+        input_tx,
+        surface_session,
+    ))
+    .catch_unwind()
+    .await;
+
+    if let Err(payload) = turn_result {
+        let msg = panic_message(&payload);
+        write_lead_log(
+            &state.lead_log,
+            &format!("\n\x1b[31m[panic]\x1b[0m {msg}\n"),
+        );
+        let _ = events_tx.send(ViewEvent::ErrorText(msg.clone()));
+        save_history(&state.agent, &mut state.session, &state.session_store);
+        let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+            &state.session_store,
+            &state.session.id,
+        )));
+        let _ = events_tx.send(ViewEvent::TurnDone);
+        let _ = lead_mb.write_status("lead", "idle", Some(&msg));
+        std::panic::resume_unwind(payload);
+    }
+}
+
+async fn drive_turn_stream_inner(
     mut stream: std::pin::Pin<
         Box<dyn futures::Stream<Item = Result<AgentEvent, crate::error::Error>> + Send>,
     >,
@@ -3971,8 +4039,19 @@ async fn drive_turn_stream(
                 // happening right now," not history.
                 progress_buf.push_str(&s);
                 if progress_buf.len() > PROGRESS_BUF_CAP {
-                    let drain = progress_buf.len() - PROGRESS_BUF_CAP / 2;
-                    progress_buf.drain(..drain);
+                    // Issue #148: the naive `len() - cap/2` byte offset
+                    // could land mid-codepoint when the model streams
+                    // multi-byte UTF-8 (Thai / CJK / emoji), tripping
+                    // `String::drain`'s `is_char_boundary(end)` assertion
+                    // and panicking the whole turn (which then lost the
+                    // session because `save_history` runs in the `Done`
+                    // arm we never reached). `str::floor_char_boundary`
+                    // (stable since 1.79) snaps the offset to the
+                    // largest boundary ≤ target, so drain is always safe.
+                    let target = progress_buf.len() - PROGRESS_BUF_CAP / 2;
+                    let safe = progress_buf
+                        .floor_char_boundary(target.min(progress_buf.len()));
+                    progress_buf.drain(..safe);
                 }
                 if let Some(m) = PROGRESS_LINE_RE.find_iter(&progress_buf).last() {
                     crate::agent_activity::update_progress(m.as_str());
@@ -5056,5 +5135,63 @@ mod tests {
         assert_eq!(display.len(), 1);
         assert_eq!(display[0].role, "tool");
         assert_eq!(display[0].content, "AskUserQuestion");
+    }
+
+    // Regression test for issue #148: `progress_buf.drain(..drain)` in
+    // drive_turn_stream_inner panicked with `is_char_boundary` failure
+    // when the byte offset fell inside a multi-byte UTF-8 codepoint
+    // (Thai/CJK/emoji from the model). Fix uses `floor_char_boundary`
+    // to snap the offset down to a safe boundary first. This test
+    // exercises the exact drain pattern the production code uses.
+    #[test]
+    fn progress_buf_drain_handles_multibyte_text() {
+        const PROGRESS_BUF_CAP: usize = 256;
+        let mut progress_buf = String::with_capacity(1024);
+        // 2000 crab emojis = 8000 bytes, all 4-byte UTF-8 — the
+        // worst case for the old naive `len() - cap/2` math.
+        progress_buf.push_str(&"🦀".repeat(2000));
+        let original_chars = progress_buf.chars().count();
+
+        // Mirror the production idiom (post-fix):
+        if progress_buf.len() > PROGRESS_BUF_CAP {
+            let target = progress_buf.len() - PROGRESS_BUF_CAP / 2;
+            let safe = progress_buf
+                .floor_char_boundary(target.min(progress_buf.len()));
+            progress_buf.drain(..safe);
+        }
+        // After drain, len() must be well under the cap and every
+        // remaining char must still be a complete codepoint.
+        assert!(progress_buf.len() <= PROGRESS_BUF_CAP);
+        assert!(progress_buf.chars().count() < original_chars);
+        // `is_char_boundary` on the drain point is the exact
+        // assertion Vec::drain uses internally — catches a future
+        // regression to the un-snapped offset.
+        assert!(progress_buf.is_char_boundary(progress_buf.len()));
+    }
+
+    #[test]
+    fn floor_char_boundary_snap_is_safe_for_mid_codepoint_offset() {
+        // 4-byte emoji repeated. Char boundaries are at 0, 4, 8, ... —
+        // `floor_char_boundary` snaps to the largest boundary ≤ target.
+        let s = "🦀".repeat(2000);
+
+        // A target inside a codepoint must snap to the previous
+        // boundary (byte 1 or 2 inside the first 4-byte emoji → 0).
+        let mid_target = 1;
+        let safe = s.floor_char_boundary(mid_target);
+        assert!(s.is_char_boundary(safe));
+        assert_eq!(safe, 0, "must snap to previous char boundary");
+        assert!(safe < mid_target);
+
+        // A target already on a boundary stays put.
+        let on_boundary = 4000; // 1000th emoji, byte offset
+        let safe = s.floor_char_boundary(on_boundary);
+        assert!(s.is_char_boundary(safe));
+        assert_eq!(safe, on_boundary);
+
+        // Target past end clamps to len() (still a valid boundary).
+        let past_end = s.len() + 100;
+        let safe = s.floor_char_boundary(past_end);
+        assert_eq!(safe, s.len());
     }
 }
