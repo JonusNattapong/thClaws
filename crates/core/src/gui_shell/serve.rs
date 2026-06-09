@@ -305,8 +305,9 @@ pub fn inject_inline_bridge_with_id(html: &[u8], shell_id: &str) -> Vec<u8> {
         .unwrap_or_else(|_| "\"\"".into())
         .replace("</", "<\\/");
     let bridge_safe = bridge.replace("</", "<\\/");
-    let injection =
-        format!("<script>window.__thclaws_shell_id={id_json};</script><script>{bridge_safe}</script>");
+    let injection = format!(
+        "<script>window.__thclaws_shell_id={id_json};</script><script>{bridge_safe}</script>"
+    );
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = find_subslice(&lower, b"<head>") {
         let insert_at = idx + b"<head>".len();
